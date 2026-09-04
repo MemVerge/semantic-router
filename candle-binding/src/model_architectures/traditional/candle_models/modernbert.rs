@@ -5,8 +5,8 @@
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{
-    embedding, layer_norm_no_bias, linear, linear_no_bias, ops::softmax, Embedding, LayerNorm,
-    Linear, Module, VarBuilder,
+    embedding, linear, linear_no_bias, ops::softmax_last_dim, Embedding, Init, LayerNorm, Linear,
+    Module, VarBuilder,
 };
 use serde::Deserialize;
 
@@ -17,6 +17,17 @@ use std::sync::Arc;
 // Flash Attention support (optional, requires flash-attn feature)
 #[cfg(feature = "flash-attn")]
 use candle_flash_attn::flash_attn;
+
+/// LayerNorm that can reach candle-nn's fused kernel. `layer_norm_no_bias` leaves `bias: None`, and
+/// `LayerNorm::forward` takes `ops::layer_norm` only when a bias exists (candle-nn
+/// layer_norm.rs:110-113), so every no-bias norm falls through to ~8 separate ops instead of one.
+/// A zeros bias is exact in fp32 and reaches the fused path. What this buys is not arithmetic — it
+/// is the per-op CUDA driver envelope, which is what a forward is actually spending its time on.
+fn layer_norm_fused(size: usize, eps: f64, vb: VarBuilder) -> Result<LayerNorm> {
+    let weight = vb.get_with_hints(size, "weight", Init::Const(1.))?;
+    let bias = Tensor::zeros(size, weight.dtype(), weight.device())?;
+    Ok(LayerNorm::new(weight, bias, eps))
+}
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Config {
@@ -208,7 +219,7 @@ impl ModernBertAttention {
     ) -> Result<Tensor> {
         let att = q.matmul(&k.transpose(D::Minus2, D::Minus1)?)?;
         let att = att.broadcast_add(attention_mask)?;
-        let att = softmax(&att, D::Minus1)?;
+        let att = softmax_last_dim(&att)?;
         att.matmul(v)
     }
 }
@@ -263,14 +274,14 @@ impl ModernBertLayer {
             cfg!(feature = "flash-attn"),
         )?;
         let mlp = ModernBertMLP::load(vb.pp("mlp"), config)?;
-        let attn_norm = layer_norm_no_bias(
+        let attn_norm = layer_norm_fused(
             config.hidden_size,
             config.layer_norm_eps,
             vb.pp("attn_norm"),
         )
         .ok();
         let mlp_norm =
-            layer_norm_no_bias(config.hidden_size, config.layer_norm_eps, vb.pp("mlp_norm"))?;
+            layer_norm_fused(config.hidden_size, config.layer_norm_eps, vb.pp("mlp_norm"))?;
         Ok(Self {
             attn,
             mlp,
@@ -314,7 +325,7 @@ pub struct ModernBertHead {
 impl ModernBertHead {
     fn load(vb: VarBuilder, config: &Config) -> Result<Self> {
         let dense = linear_no_bias(config.hidden_size, config.hidden_size, vb.pp("dense"))?;
-        let norm = layer_norm_no_bias(config.hidden_size, config.layer_norm_eps, vb.pp("norm"))?;
+        let norm = layer_norm_fused(config.hidden_size, config.layer_norm_eps, vb.pp("norm"))?;
         Ok(Self { dense, norm })
     }
 }
@@ -409,7 +420,7 @@ impl ModernBert {
             config.hidden_size,
             vb.pp("model.embeddings.tok_embeddings"),
         )?;
-        let norm = layer_norm_no_bias(
+        let norm = layer_norm_fused(
             config.hidden_size,
             config.layer_norm_eps,
             vb.pp("model.embeddings.norm"),
@@ -442,7 +453,7 @@ impl ModernBert {
             )?);
         }
 
-        let final_norm = layer_norm_no_bias(
+        let final_norm = layer_norm_fused(
             config.hidden_size,
             config.layer_norm_eps,
             vb.pp("model.final_norm"),
@@ -526,7 +537,7 @@ impl ModernBertClassifier {
 impl Module for ModernBertClassifier {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let xs = xs.apply(&self.classifier)?;
-        softmax(&xs, D::Minus1)
+        softmax_last_dim(&xs)
     }
 }
 
