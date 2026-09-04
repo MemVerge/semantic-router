@@ -38,7 +38,7 @@ func (r *OpenAIRouter) handleRequestHeaders(v *ext_proc.ProcessingRequest_Reques
 	// also short-circuit in the no-op path.
 	if ctx.SkipProcessing {
 		detectStreamingExpectation(ctx)
-		return newContinueRequestHeadersResponse(), nil
+		return newContinueRequestHeadersResponse(stripClientOnlyRequestHeaders(nil)), nil
 	}
 
 	if replayResp := r.handleRouterReplayAPI(method, path); replayResp != nil {
@@ -55,7 +55,7 @@ func (r *OpenAIRouter) handleRequestHeaders(v *ext_proc.ProcessingRequest_Reques
 	if validationResp := r.validateRequestHeaders(method, path); validationResp != nil {
 		return validationResp, nil
 	}
-	return newContinueRequestHeadersResponse(buildIdentityEncodingRequestMutation()), nil
+	return newContinueRequestHeadersResponse(stripClientOnlyRequestHeaders(buildIdentityEncodingRequestMutation())), nil
 }
 
 func startRequestHeaderSpan(
@@ -179,6 +179,22 @@ func buildIdentityEncodingRequestMutation() *ext_proc.HeaderMutation {
 			},
 		}},
 	}
+}
+
+// clientOnlyRequestHeaders are request headers addressed to the router alone:
+// they were consumed into ctx.Headers at capture time and must not reach the
+// upstream provider. They are removed in the header phase so every later
+// path — routed, skip-processing, cache hit, error — is covered by one strip.
+var clientOnlyRequestHeaders = []string{headers.MemBoxCurrentMessage}
+
+// stripClientOnlyRequestHeaders adds the client-only header removals to
+// mutation, allocating one when nil is passed.
+func stripClientOnlyRequestHeaders(mutation *ext_proc.HeaderMutation) *ext_proc.HeaderMutation {
+	if mutation == nil {
+		mutation = &ext_proc.HeaderMutation{}
+	}
+	mutation.RemoveHeaders = append(mutation.RemoveHeaders, clientOnlyRequestHeaders...)
+	return mutation
 }
 
 // hopByHopDropList is the set of HTTP framing headers we strip from

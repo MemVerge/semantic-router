@@ -48,11 +48,14 @@ type StreamingToolCallState struct {
 
 // RequestContext holds the context for processing a request.
 type RequestContext struct {
-	Headers             map[string]string
-	RequestID           string
-	OriginalRequestBody []byte
-	RequestModel        string
-	RequestQuery        string
+	Headers map[string]string
+	// CurrentMessageFromHeader is set when UserContent came from
+	// x-membox-current-message rather than the body (see applyCurrentMessageHeader).
+	CurrentMessageFromHeader bool
+	RequestID                string
+	OriginalRequestBody      []byte
+	RequestModel             string
+	RequestQuery             string
 	// CacheQuery is the semantic-cache lookup key (may include user scope); empty means fall back to RequestQuery.
 	CacheQuery          string
 	StartTime           time.Time
