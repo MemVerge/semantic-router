@@ -32,6 +32,19 @@ enum PaddingSide {
 /// Global singleton for ModelFactory
 pub(crate) static GLOBAL_MODEL_FACTORY: OnceLock<ModelFactory> = OnceLock::new();
 
+fn required_embedding_device(use_cpu: bool) -> Option<candle_core::Device> {
+    if use_cpu {
+        return Some(candle_core::Device::Cpu);
+    }
+    match candle_core::Device::new_cuda(0) {
+        Ok(device) => Some(device),
+        Err(error) => {
+            eprintln!("ERROR: CUDA embedding device is required: {:?}", error);
+            None
+        }
+    }
+}
+
 use crate::model_architectures::embedding::MultiModalEmbeddingModel;
 use tokenizers::Tokenizer as MmTokenizer;
 
@@ -264,8 +277,6 @@ where
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn init_mmbert_embedding_model(model_path: *const c_char, use_cpu: bool) -> bool {
-    use candle_core::Device;
-
     if model_path.is_null() {
         eprintln!("Error: model_path is null");
         return false;
@@ -281,6 +292,10 @@ pub extern "C" fn init_mmbert_embedding_model(model_path: *const c_char, use_cpu
         }
     };
 
+    let Some(device) = required_embedding_device(use_cpu) else {
+        return false;
+    };
+
     // Check if already initialized
     if let Some(factory) = GLOBAL_MODEL_FACTORY.get() {
         if factory.get_mmbert_model().is_some() {
@@ -288,13 +303,6 @@ pub extern "C" fn init_mmbert_embedding_model(model_path: *const c_char, use_cpu
             return true;
         }
     }
-
-    // Determine device
-    let device = if use_cpu {
-        Device::Cpu
-    } else {
-        Device::cuda_if_available(0).unwrap_or(Device::Cpu)
-    };
 
     // Create or get factory
     let factory = if GLOBAL_MODEL_FACTORY.get().is_some() {
@@ -341,7 +349,9 @@ pub extern "C" fn init_embedding_models_with_mmbert(
     mmbert_model_path: *const c_char,
     use_cpu: bool,
 ) -> bool {
-    use candle_core::Device;
+    let Some(device) = required_embedding_device(use_cpu) else {
+        return false;
+    };
 
     if GLOBAL_MODEL_FACTORY.get().is_some() {
         eprintln!("WARNING: ModelFactory already initialized");
@@ -386,12 +396,6 @@ pub extern "C" fn init_embedding_models_with_mmbert(
         eprintln!("Error: at least one model path must be provided");
         return false;
     }
-
-    let device = if use_cpu {
-        Device::Cpu
-    } else {
-        Device::cuda_if_available(0).unwrap_or(Device::Cpu)
-    };
 
     let mut factory = ModelFactory::new(device);
 
@@ -784,13 +788,12 @@ fn generate_mmbert_embeddings_batch(
         .get_mmbert_tokenizer()
         .ok_or_else(|| "mmBERT tokenizer not available".to_string())?;
 
-    // Batch encode
-    let embeddings = model
-        .encode_batch_with_matryoshka(tokenizer, texts, 8192, target_layer, target_dim)
-        .map_err(|e| format!("mmBERT batch encoding failed: {:?}", e))?;
-
-    // Convert to Vec<Vec<f32>>
-    embeddings
+    // The model's own positional limit rather than a literal: a row longer than this cannot be
+    // position-encoded at all, and the scalar path leaves the ceiling to the tokenizer.
+    let max_length = model.config().max_position_embeddings;
+    model
+        .encode_batch_with_matryoshka(tokenizer, texts, max_length, target_layer, target_dim)
+        .map_err(|e| format!("mmBERT batch encoding failed: {:?}", e))?
         .to_vec2::<f32>()
         .map_err(|e| format!("Failed to convert embeddings: {:?}", e))
 }

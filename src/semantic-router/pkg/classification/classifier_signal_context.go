@@ -1,6 +1,7 @@
 package classification
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
@@ -42,6 +43,25 @@ func textForSignalFunc(text, uncompressedText string, skipCompressionSignals map
 	}
 }
 
+// Native classifiers cross a C-string boundary; replacement preserves the suffix.
+func normalizeSignalText(text string) string {
+	return strings.ReplaceAll(text, "\x00", "\uFFFD")
+}
+
+func normalizeSignalTexts(texts []string) []string {
+	for _, text := range texts {
+		if strings.IndexByte(text, 0) < 0 {
+			continue
+		}
+		normalized := append([]string(nil), texts...)
+		for i := range normalized {
+			normalized[i] = normalizeSignalText(normalized[i])
+		}
+		return normalized
+	}
+	return texts
+}
+
 // EvaluateAllSignalsWithContext evaluates all signal types with separate text for context counting.
 //
 // text: (possibly compressed) text for signal evaluation
@@ -54,14 +74,14 @@ func textForSignalFunc(text, uncompressedText string, skipCompressionSignals map
 func (c *Classifier) EvaluateAllSignalsWithContext(text string, contextText string, currentUserText string, priorUserMessages []string, nonUserMessages []string, hasPriorAssistantReply bool, forceEvaluateAll bool, uncompressedText string, skipCompressionSignals map[string]bool, convFacts ConversationFacts, imageURL string) *SignalResults {
 	defer c.enterSignalEvaluationLoadGate()()
 	input := signalEvaluationInput{
-		text:                   text,
+		text:                   normalizeSignalText(text),
 		contextText:            contextText,
-		currentUserText:        currentUserText,
-		priorUserMessages:      priorUserMessages,
-		nonUserMessages:        nonUserMessages,
+		currentUserText:        normalizeSignalText(currentUserText),
+		priorUserMessages:      normalizeSignalTexts(priorUserMessages),
+		nonUserMessages:        normalizeSignalTexts(nonUserMessages),
 		hasPriorAssistantReply: hasPriorAssistantReply,
 		forceEvaluateAll:       forceEvaluateAll,
-		uncompressedText:       uncompressedText,
+		uncompressedText:       normalizeSignalText(uncompressedText),
 		skipCompressionSignals: skipCompressionSignals,
 		convFacts:              convFacts,
 		imageURL:               imageURL,

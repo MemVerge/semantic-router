@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	candle "github.com/vllm-project/semantic-router/candle-binding"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 )
 
@@ -229,6 +230,51 @@ func TestSignalBatchingDisabledBypassesCollector(t *testing.T) {
 	if !containsString(result.MatchedKeywordRules, "scalar-keyword") {
 		t.Fatalf("disabled path did not preserve active scalar signal: %v", result.MatchedKeywordRules)
 	}
+}
+
+func TestSignalBatchingNormalizesNativeTextInputsWithoutDroppingSignals(t *testing.T) {
+	cfg := &config.RouterConfig{}
+	cfg.API.BatchClassification.SignalBatchingEnabled = true
+	cfg.API.BatchClassification.MaxConcurrency = signalBatchMaxSize
+	cfg.API.BatchClassification.ConcurrencyThreshold = 1
+	cfg.ComplexityRules = []config.ComplexityRule{{Name: "complexity", Method: config.ComplexityMethodModel, Threshold: 0.5}}
+	complexity := &complexityBatchSpy{results: []candle.ClassResult{{Class: 2, Confidence: 0.9}}}
+	classifier, err := newClassifierWithOptions(cfg, withComplexityModel(difficultyMapping(), nil, complexity))
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured := make(chan signalEvaluationInput, 1)
+	evaluate := classifier.signalBatchCollector.evaluate
+	classifier.signalBatchCollector.evaluate = func(inputs []signalEvaluationInput) []*SignalResults {
+		captured <- inputs[0]
+		return evaluate(inputs)
+	}
+
+	priorUserMessages := []string{"prior\x00suffix"}
+	nonUserMessages := []string{"system\x00suffix"}
+	result := classifier.EvaluateAllSignalsWithContext(
+		"body\x00suffix", "context\x00unchanged", "current\x00suffix",
+		priorUserMessages, nonUserMessages, false, true, "raw\x00suffix",
+		map[string]bool{config.SignalTypeComplexity: true}, ConversationFacts{}, "",
+	)
+	input := <-captured
+	if input.text != "body\uFFFDsuffix" || input.currentUserText != "current\uFFFDsuffix" || input.uncompressedText != "raw\uFFFDsuffix" {
+		t.Fatalf("normalized input = %+v", input)
+	}
+	assertStringSlice(t, "prior user messages", input.priorUserMessages, []string{"prior\uFFFDsuffix"})
+	assertStringSlice(t, "non-user messages", input.nonUserMessages, []string{"system\uFFFDsuffix"})
+	if input.contextText != "context\x00unchanged" {
+		t.Fatalf("context-only text changed: %q", input.contextText)
+	}
+	assertStringSlice(t, "caller prior user messages", priorUserMessages, []string{"prior\x00suffix"})
+	assertStringSlice(t, "caller non-user messages", nonUserMessages, []string{"system\x00suffix"})
+	if !containsString(result.MatchedComplexityRules, "complexity:hard") {
+		t.Fatalf("normalized row lost its model signal: %v", result.MatchedComplexityRules)
+	}
+	if complexity.batchCalls != 1 || complexity.scalarCalls != 0 {
+		t.Fatalf("model calls: batch=%d scalar=%d", complexity.batchCalls, complexity.scalarCalls)
+	}
+	assertStringSlice(t, "complexity inputs", complexity.inputs, []string{"raw\uFFFDsuffix"})
 }
 
 func TestSignalBatchingIsPerClassifierAndIgnoresConfiguredMaxBatchSize(t *testing.T) {
