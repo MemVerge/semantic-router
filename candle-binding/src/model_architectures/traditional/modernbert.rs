@@ -644,7 +644,19 @@ impl TraditionalModernBertClassifier {
         let device = if use_cpu {
             Device::Cpu
         } else {
-            Device::new_cuda(0)?
+            let cuda = Device::new_cuda(0)?;
+            // candle only ever uses the context's default stream, so the pair of events cudarc
+            // creates, waits on and destroys for EVERY allocation can never gate anything: the code
+            // that would consume them is behind is_managing_stream_synchronization(), which also
+            // requires multi-stream mode. They are the majority of the driver calls a forward makes,
+            // and a forward is driver-bound. The unsafe contract is exactly "no cross-stream use",
+            // which one stream satisfies; the flag is context-wide, so every other loader on this
+            // device inherits it.
+            #[cfg(feature = "cuda")]
+            if let Device::Cuda(d) = &cuda {
+                unsafe { d.disable_event_tracking() };
+            }
+            cuda
         };
         println!(
             "ModernBERT classifier device: {} (use_cpu={})",
