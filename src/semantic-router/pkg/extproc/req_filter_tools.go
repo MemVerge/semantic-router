@@ -23,6 +23,11 @@ import (
 // handleToolSelectionForRequest handles tool selection for the request.
 func (r *OpenAIRouter) handleToolSelectionForRequest(openAIRequest *openai.ChatCompletionNewParams, response *ext_proc.ProcessingResponse, ctx *RequestContext) {
 	userContent, nonUserMessages := extractUserAndNonUserContent(openAIRequest)
+	if ctx != nil && ctx.CurrentMessageFromHeader && ctx.UserContent != "" {
+		// The client named the current turn explicitly; select tools
+		// against it, not the injected context in the body.
+		userContent = ctx.UserContent
+	}
 	if err := r.handleToolSelection(openAIRequest, userContent, nonUserMessages, &response, ctx); err != nil {
 		logging.Errorf("Error in tool selection: %v", err)
 		// Continue without failing the request

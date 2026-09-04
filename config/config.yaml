@@ -1410,6 +1410,11 @@ global:
       timeout_sec: 15
     skip_processing:
       enabled: false
+    # Honor x-membox-current-message as the current user turn for request
+    # signals (base64 UTF-8). Off by default: the caller then chooses the
+    # text the security signals evaluate. Enable only for trusted clients.
+    current_message_header:
+      enabled: false
     model_selection:
       method: hybrid
       enabled: true

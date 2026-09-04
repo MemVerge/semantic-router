@@ -9,6 +9,19 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 )
 
+// currentMessageHeaderEnabled reports whether x-membox-current-message is
+// honored. Like x-vsr-skip-processing it is gated by deployment config
+// (global.router.current_message_header.enabled, default off): the header
+// lets a caller choose the text every request signal evaluates — including
+// jailbreak and PII detection — while the body the model receives stays as
+// sent, so only deployments whose clients are trusted to fill it turn it on.
+func (r *OpenAIRouter) currentMessageHeaderEnabled() bool {
+	if r == nil || r.Config == nil {
+		return false
+	}
+	return r.Config.CurrentMessageHeader.IsEnabled()
+}
+
 // applyCurrentMessageHeader lets a client name the current user turn
 // explicitly instead of having the router infer it from the last "user"
 // message in the body.
@@ -17,23 +30,23 @@ import (
 // (MemBox prepends retrieved memories and prior turns into the messages it
 // sends) end up with a last user message the router should not treat as the
 // user's own words: every signal that reads UserContent — decision
-// evaluation, RAG lookup, the semantic-cache key, modality detection — then
-// keys off injected context rather than the turn the user typed. The client
-// already holds the verbatim turn, so it sends it in
-// x-membox-current-message (base64 of the UTF-8 text) and the router uses
-// that as UserContent.
+// evaluation, RAG lookup, tool selection, modality detection — then keys off
+// injected context rather than the turn the user typed. The client already
+// holds the verbatim turn, so it sends it in x-membox-current-message
+// (base64 of the UTF-8 text) and the router uses that as UserContent.
 //
 // Only UserContent is replaced. PriorUserMessages, NonUserMessages and the
 // conversation-shape counts still describe the body as sent, because that is
-// what the upstream model will see. A missing, empty, undecodable or
-// non-UTF-8 header leaves the body-derived extraction untouched, so a client
-// that never sends the header, or sends a bad one, gets today's behaviour.
-func applyCurrentMessageHeader(fast *FastExtractResult, ctx *RequestContext) {
-	if fast == nil || ctx == nil {
+// what the upstream model will see; the semantic cache keys off the body for
+// the same reason. A missing, empty, undecodable or non-UTF-8 header leaves
+// the body-derived extraction untouched, so a client that never sends the
+// header, or sends a bad one, gets today's behaviour.
+func (r *OpenAIRouter) applyCurrentMessageHeader(fast *FastExtractResult, ctx *RequestContext) {
+	if fast == nil || ctx == nil || !r.currentMessageHeaderEnabled() {
 		return
 	}
-	raw, ok := lookupHeaderFold(ctx.Headers, headers.MemBoxCurrentMessage)
-	if !ok || strings.TrimSpace(raw) == "" {
+	raw := headerValueCI(ctx, headers.MemBoxCurrentMessage)
+	if strings.TrimSpace(raw) == "" {
 		return
 	}
 	text, err := decodeCurrentMessageHeader(raw)
@@ -50,11 +63,12 @@ func applyCurrentMessageHeader(fast *FastExtractResult, ctx *RequestContext) {
 	}
 	logging.ComponentDebugEvent("extproc", "current_message_header_applied", map[string]interface{}{
 		"request_id":      ctx.RequestID,
-		"header_chars":    len(text),
-		"body_user_chars": len(fast.UserContent),
+		"header_bytes":    len(text),
+		"body_user_bytes": len(fast.UserContent),
 		"body_user_count": fast.UserMessageCount,
 	})
 	fast.UserContent = text
+	ctx.CurrentMessageFromHeader = true
 }
 
 // decodeCurrentMessageHeader decodes the base64 (standard alphabet, padding
@@ -77,18 +91,3 @@ func decodeCurrentMessageHeader(raw string) (string, error) {
 type currentMessageHeaderError struct{ reason string }
 
 func (e *currentMessageHeaderError) Error() string { return e.reason }
-
-// lookupHeaderFold finds a header by case-insensitive name. HTTP/2 lowercases
-// header names on the wire, but ctx.Headers stores keys as received, so an
-// HTTP/1.1 client or a test fixture may carry mixed case.
-func lookupHeaderFold(h map[string]string, name string) (string, bool) {
-	if v, ok := h[name]; ok {
-		return v, true
-	}
-	for k, v := range h {
-		if strings.EqualFold(k, name) {
-			return v, true
-		}
-	}
-	return "", false
-}
