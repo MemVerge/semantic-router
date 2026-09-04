@@ -1,6 +1,7 @@
 package classification
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +81,82 @@ func (c *Classifier) evaluateEmbeddingSignal(results *SignalResults, mu *sync.Mu
 		bestConfidence = recordEmbeddingResult(results, imageResult, imageElapsed, bestConfidence)
 	}
 	results.Metrics.Embedding.Confidence = bestConfidence
+}
+
+func (c *Classifier) evaluateEmbeddingSignalsBatch(rows []*signalEvaluationRow) {
+	textResults := make([]*EmbeddingClassificationResult, len(rows))
+	textErrors := make([]error, len(rows))
+	textElapsedByRow := make([]time.Duration, len(rows))
+	textRows := make([]int, 0, len(rows))
+	texts := make([]string, 0, len(rows))
+	for i, row := range rows {
+		text := row.textForSignal(config.SignalTypeEmbedding)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		textRows = append(textRows, i)
+		texts = append(texts, text)
+	}
+
+	var textElapsed time.Duration
+	if len(texts) > 0 {
+		started := time.Now()
+		batchResults, err := c.keywordEmbeddingClassifier.ClassifyDetailedBatch(texts)
+		textElapsed = time.Since(started)
+		if err == nil && len(batchResults) != len(texts) {
+			err = fmt.Errorf("embedding classifier batch returned %d results for %d inputs", len(batchResults), len(texts))
+		}
+		if err != nil {
+			for _, row := range textRows {
+				textErrors[row] = err
+				textElapsedByRow[row] = textElapsed
+			}
+		} else {
+			for i, row := range textRows {
+				textResults[row] = batchResults[i]
+				textElapsedByRow[row] = textElapsed
+			}
+		}
+	}
+
+	for i, row := range rows {
+		var (
+			imageResult  *EmbeddingClassificationResult
+			imageErr     error
+			imageElapsed time.Duration
+		)
+		if strings.TrimSpace(row.input.imageURL) != "" {
+			started := time.Now()
+			imageResult, imageErr = c.keywordEmbeddingClassifier.classifyDetailedMultimodalWithCache(
+				config.QueryModalityImage,
+				row.input.imageURL,
+				row.imgCache,
+			)
+			imageElapsed = time.Since(started)
+		}
+
+		rowTextElapsed := textElapsedByRow[i]
+		row.results.Metrics.Embedding.ExecutionTimeMs = float64((rowTextElapsed + imageElapsed).Microseconds()) / 1000.0
+		logging.Debugf("[Signal Computation] Embedding signal evaluation completed in %v (text=%v image=%v)",
+			rowTextElapsed+imageElapsed, rowTextElapsed, imageElapsed)
+		if textErrors[i] != nil {
+			logging.Errorf("text-modality embedding rule evaluation failed: %v", textErrors[i])
+		}
+		if imageErr != nil {
+			logging.Errorf("image-modality embedding rule evaluation failed: %v", imageErr)
+		}
+
+		row.mu.Lock()
+		bestConfidence := 0.0
+		if textResults[i] != nil {
+			bestConfidence = recordEmbeddingResult(row.results, textResults[i], rowTextElapsed, bestConfidence)
+		}
+		if imageResult != nil {
+			bestConfidence = recordEmbeddingResult(row.results, imageResult, imageElapsed, bestConfidence)
+		}
+		row.results.Metrics.Embedding.Confidence = bestConfidence
+		row.mu.Unlock()
+	}
 }
 
 // recordEmbeddingResult merges scores and matches from a single classification

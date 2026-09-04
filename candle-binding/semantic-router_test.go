@@ -17,7 +17,36 @@ import (
 	"time"
 )
 
-// ResetModel completely resets the model in Rust side to allow loading a new model
+func TestBatchAPIsReturnEmptySlicesWithoutModelInitialization(t *testing.T) {
+	classificationCalls := []struct {
+		name string
+		call func([]string) ([]ClassResult, error)
+	}{
+		{name: "complexity", call: ClassifyComplexityTextBatch},
+		{name: "intent", call: ClassifyMmBert32KIntentBatch},
+		{name: "fact-check", call: ClassifyMmBert32KFactcheckBatch},
+	}
+	for _, test := range classificationCalls {
+		t.Run(test.name, func(t *testing.T) {
+			results, err := test.call([]string{})
+			if err != nil {
+				t.Fatalf("empty batch returned an error: %v", err)
+			}
+			if results == nil || len(results) != 0 {
+				t.Fatalf("empty batch = %#v, want a non-nil empty slice", results)
+			}
+		})
+	}
+
+	embeddings, err := EncodeMmBert32KTextBatch([]string{}, 256)
+	if err != nil {
+		t.Fatalf("empty embedding batch returned an error: %v", err)
+	}
+	if embeddings == nil || len(embeddings) != 0 {
+		t.Fatalf("empty embedding batch = %#v, want a non-nil empty slice", embeddings)
+	}
+}
+
 func ResetModel() {
 	// Clean up the model state
 	modelInitialized = false

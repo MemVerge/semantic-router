@@ -39,6 +39,24 @@ pub struct EmbeddingResult {
     pub processing_time_ms: f32,
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct MmBertBatchEmbeddingResult {
+    pub data: *mut f32,
+    pub rows: i32,
+    pub dimensions: i32,
+}
+
+impl Default for MmBertBatchEmbeddingResult {
+    fn default() -> Self {
+        Self {
+            data: std::ptr::null_mut(),
+            rows: 0,
+            dimensions: 0,
+        }
+    }
+}
+
 /// Tokenization result structure (matches Go C struct)
 #[repr(C)]
 #[derive(Debug)]

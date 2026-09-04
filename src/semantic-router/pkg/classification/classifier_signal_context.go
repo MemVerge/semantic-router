@@ -53,46 +53,71 @@ func textForSignalFunc(text, uncompressedText string, skipCompressionSignals map
 // imageURL: image URL for multimodal signals ("" when the request carries no image)
 func (c *Classifier) EvaluateAllSignalsWithContext(text string, contextText string, currentUserText string, priorUserMessages []string, nonUserMessages []string, hasPriorAssistantReply bool, forceEvaluateAll bool, uncompressedText string, skipCompressionSignals map[string]bool, convFacts ConversationFacts, imageURL string) *SignalResults {
 	defer c.enterSignalEvaluationLoadGate()()
-	// Determine which signals (type:name) should be evaluated
-	var usedSignals map[string]bool
-	if forceEvaluateAll {
-		usedSignals = c.getAllSignalTypes()
-		logging.Debugf("[Signal Computation] Force evaluate all signals mode enabled")
-	} else {
-		usedSignals = c.getUsedSignals()
+	input := signalEvaluationInput{
+		text:                   text,
+		contextText:            contextText,
+		currentUserText:        currentUserText,
+		priorUserMessages:      priorUserMessages,
+		nonUserMessages:        nonUserMessages,
+		hasPriorAssistantReply: hasPriorAssistantReply,
+		forceEvaluateAll:       forceEvaluateAll,
+		uncompressedText:       uncompressedText,
+		skipCompressionSignals: skipCompressionSignals,
+		convFacts:              convFacts,
+		imageURL:               imageURL,
 	}
+	if c.signalBatchCollector == nil {
+		return c.evaluateSignalInputs([]signalEvaluationInput{input}, false)[0]
+	}
+	return <-c.signalBatchCollector.enqueue(input)
+}
 
-	textForSignal := textForSignalFunc(text, uncompressedText, skipCompressionSignals)
-	ready := c.signalReadiness()
+type signalEvaluationRow struct {
+	input         signalEvaluationInput
+	usedSignals   map[string]bool
+	textForSignal func(string) string
+	results       *SignalResults
+	mu            sync.Mutex
+	imgCache      *requestImageEmbeddingCache
+}
 
-	results := &SignalResults{
-		Metrics:           &SignalMetricsCollection{},
-		SignalConfidences: make(map[string]float64),
-		SignalValues:      make(map[string]float64),
+func (c *Classifier) evaluateSignalBatch(inputs []signalEvaluationInput) []*SignalResults {
+	return c.evaluateSignalInputs(inputs, true)
+}
+
+func (c *Classifier) evaluateSignalInputs(inputs []signalEvaluationInput, batchModels bool) []*SignalResults {
+	rows := make([]*signalEvaluationRow, len(inputs))
+	for i, input := range inputs {
+		var usedSignals map[string]bool
+		if input.forceEvaluateAll {
+			usedSignals = c.getAllSignalTypes()
+			logging.Debugf("[Signal Computation] Force evaluate all signals mode enabled")
+		} else {
+			usedSignals = c.getUsedSignals()
+		}
+		row := &signalEvaluationRow{
+			input:         input,
+			usedSignals:   usedSignals,
+			textForSignal: textForSignalFunc(input.text, input.uncompressedText, input.skipCompressionSignals),
+			results:       newSignalResults(),
+		}
+		if input.imageURL != "" {
+			row.imgCache = newRequestImageEmbeddingCache()
+		}
+		rows[i] = row
 	}
 
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	imgArg := imageURL
-
-	// Allocate a request-scoped image embedding cache only when an image is
-	// actually attached. Two signals - complexity (image rules) and embedding
-	// (image-modality rules) - independently pull image embeddings via FFI;
-	// the cache lets whichever runs first donate its result to the other,
-	// turning two SigLIP forward passes into one. With no image attached,
-	// neither signal touches the cache, so leaving it nil is correct.
-	var imgCache *requestImageEmbeddingCache
-	if imgArg != "" {
-		imgCache = newRequestImageEmbeddingCache()
-	}
-
-	dispatchers := c.buildSignalDispatchers(results, &mu, textForSignal, contextText, currentUserText, priorUserMessages, nonUserMessages, hasPriorAssistantReply, imgArg, imgCache, convFacts)
-	runSignalDispatchers(dispatchers, usedSignals, ready, &wg)
-
+	dispatchers := c.buildSignalDispatchers()
+	runSignalDispatchers(dispatchers, rows, c.signalReadiness(), batchModels, &wg)
 	wg.Wait()
-	results = c.applySignalGroups(results)
-	results = c.applySignalComposers(results)
-	results = c.applySignalOutputPolicies(results)
-	results = c.applyProjections(results)
+
+	results := make([]*SignalResults, len(rows))
+	for i, row := range rows {
+		result := c.applySignalGroups(row.results)
+		result = c.applySignalComposers(result)
+		result = c.applySignalOutputPolicies(result)
+		results[i] = c.applyProjections(result)
+	}
 	return results
 }

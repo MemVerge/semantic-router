@@ -9,6 +9,8 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 )
 
+var classifyMmBert32KFactcheckBatch = candle.ClassifyMmBert32KFactcheckBatch
+
 // FactCheckResult represents the result of fact-check classification
 type FactCheckResult struct {
 	NeedsFactCheck bool    `json:"needs_fact_check"`
@@ -95,17 +97,68 @@ func (c *FactCheckClassifier) Initialize() error {
 func (c *FactCheckClassifier) Classify(text string) (*FactCheckResult, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.classifyLocked(text)
+}
 
+func (c *FactCheckClassifier) ClassifyBatch(texts []string) ([]*FactCheckResult, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if !c.initialized {
+		return nil, fmt.Errorf("fact-check classifier not initialized")
+	}
+	results := make([]*FactCheckResult, len(texts))
+	if !c.useMmBERT32K {
+		for i, text := range texts {
+			result, err := c.classifyLocked(text)
+			if err != nil {
+				return nil, err
+			}
+			results[i] = result
+		}
+		return results, nil
+	}
+
+	nonEmptyTexts := make([]string, 0, len(texts))
+	nonEmptyRows := make([]int, 0, len(texts))
+	for i, text := range texts {
+		if text == "" {
+			results[i] = emptyFactCheckResult()
+			continue
+		}
+		nonEmptyTexts = append(nonEmptyTexts, text)
+		nonEmptyRows = append(nonEmptyRows, i)
+	}
+	if len(nonEmptyTexts) == 0 {
+		return results, nil
+	}
+	classResults, err := classifyMmBert32KFactcheckBatch(nonEmptyTexts)
+	if err != nil {
+		return nil, fmt.Errorf("fact-check ML batch classification failed: %w", err)
+	}
+	if len(classResults) != len(nonEmptyTexts) {
+		return nil, fmt.Errorf("fact-check ML batch returned %d results for %d inputs", len(classResults), len(nonEmptyTexts))
+	}
+	for i, classResult := range classResults {
+		row := nonEmptyRows[i]
+		// factCheckResult decides on Class == 1, so a failed row would read as a genuine
+		// "not needed" verdict and match that rule. A nil slot is what the scalar path's error
+		// leaves behind.
+		if classResult.Class < 0 {
+			continue
+		}
+		results[row] = c.factCheckResult(classResult, len(texts[row]))
+	}
+	return results, nil
+}
+
+func (c *FactCheckClassifier) classifyLocked(text string) (*FactCheckResult, error) {
 	if !c.initialized {
 		return nil, fmt.Errorf("fact-check classifier not initialized")
 	}
 
 	if text == "" {
-		return &FactCheckResult{
-			NeedsFactCheck: false,
-			Confidence:     1.0,
-			Label:          FactCheckLabelNotNeeded,
-		}, nil
+		return emptyFactCheckResult(), nil
 	}
 
 	var result candle.ClassResult
@@ -118,7 +171,10 @@ func (c *FactCheckClassifier) Classify(text string) (*FactCheckResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fact-check ML classification failed: %w", err)
 	}
+	return c.factCheckResult(result, len(text)), nil
+}
 
+func (c *FactCheckClassifier) factCheckResult(result candle.ClassResult, textLength int) *FactCheckResult {
 	// Model outputs: 0=NO_FACT_CHECK_NEEDED, 1=FACT_CHECK_NEEDED
 	needsFactCheck := result.Class == 1
 	confidence := result.Confidence
@@ -145,13 +201,21 @@ func (c *FactCheckClassifier) Classify(text string) (*FactCheckResult, error) {
 	}
 
 	logging.Debugf("Fact-check ML classification: text_len=%d, needs_fact_check=%v, confidence=%.3f",
-		len(text), needsFactCheck, confidence)
+		textLength, needsFactCheck, confidence)
 
 	return &FactCheckResult{
 		NeedsFactCheck: needsFactCheck,
 		Confidence:     confidence,
 		Label:          label,
-	}, nil
+	}
+}
+
+func emptyFactCheckResult() *FactCheckResult {
+	return &FactCheckResult{
+		NeedsFactCheck: false,
+		Confidence:     1.0,
+		Label:          FactCheckLabelNotNeeded,
+	}
 }
 
 // IsInitialized returns whether the classifier is initialized
