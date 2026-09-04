@@ -638,12 +638,19 @@ impl TraditionalModernBertClassifier {
         use_cpu: bool,
         variant: ModernBertVariant,
     ) -> Result<Self, candle_core::Error> {
-        // 1. Determine device
+        // 1. Determine device. `use_cpu: false` REQUIRES a CUDA device: `cuda_if_available` would
+        // silently return Cpu on a non-CUDA build or a pod without a GPU, and that is a 30x
+        // slowdown nothing reports.
         let device = if use_cpu {
             Device::Cpu
         } else {
-            Device::cuda_if_available(0).unwrap_or(Device::Cpu)
+            Device::new_cuda(0)?
         };
+        println!(
+            "ModernBERT classifier device: {} (use_cpu={})",
+            if device.is_cuda() { "cuda:0" } else { "cpu" },
+            use_cpu
+        );
         // 2. Load config.json
         let config_path = format!("{}/config.json", model_path);
         let config_str = std::fs::read_to_string(&config_path).map_err(|_e| {
