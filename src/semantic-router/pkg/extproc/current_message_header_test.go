@@ -32,14 +32,43 @@ func ctxWithHeaders(h map[string]string) *RequestContext {
 	return &RequestContext{Headers: h, RequestID: "req-1"}
 }
 
+func newRouterWithCurrentMessageHeader(enabled bool) *OpenAIRouter {
+	return &OpenAIRouter{
+		Config: &config.RouterConfig{
+			RouterOptions: config.RouterOptions{
+				CurrentMessageHeader: config.CurrentMessageHeaderConfig{Enabled: enabled},
+			},
+		},
+	}
+}
+
+func TestApplyCurrentMessageHeader_DisabledByDefaultIgnoresHeader(t *testing.T) {
+	for name, router := range map[string]*OpenAIRouter{
+		"gate off":   newRouterWithCurrentMessageHeader(false),
+		"no config":  {},
+		"nil router": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fast, err := extractContentFast([]byte(memoryAugmentedBody))
+			require.NoError(t, err)
+			want := fast.UserContent
+			ctx := ctxWithHeaders(map[string]string{headers.MemBoxCurrentMessage: b64("where should I stay?")})
+			router.applyCurrentMessageHeader(fast, ctx)
+			assert.Equal(t, want, fast.UserContent)
+			assert.False(t, ctx.CurrentMessageFromHeader)
+		})
+	}
+}
+
 func TestApplyCurrentMessageHeader_ReplacesOnlyUserContent(t *testing.T) {
 	fast, err := extractContentFast([]byte(memoryAugmentedBody))
 	require.NoError(t, err)
 	before := *fast
 
 	ctx := ctxWithHeaders(map[string]string{headers.MemBoxCurrentMessage: b64("where should I stay?")})
-	applyCurrentMessageHeader(fast, ctx)
+	newRouterWithCurrentMessageHeader(true).applyCurrentMessageHeader(fast, ctx)
 
+	assert.True(t, ctx.CurrentMessageFromHeader)
 	assert.Equal(t, "where should I stay?", fast.UserContent)
 	assert.Equal(t, before.PriorUserMessages, fast.PriorUserMessages, "prior turns describe the body as sent")
 	assert.Equal(t, before.NonUserMessages, fast.NonUserMessages)
@@ -53,10 +82,10 @@ func TestApplyCurrentMessageHeader_AbsentKeepsBodyExtraction(t *testing.T) {
 	require.NoError(t, err)
 	want := fast.UserContent
 
-	applyCurrentMessageHeader(fast, ctxWithHeaders(map[string]string{}))
+	newRouterWithCurrentMessageHeader(true).applyCurrentMessageHeader(fast, ctxWithHeaders(map[string]string{}))
 	assert.Equal(t, want, fast.UserContent)
 
-	applyCurrentMessageHeader(fast, ctxWithHeaders(nil))
+	newRouterWithCurrentMessageHeader(true).applyCurrentMessageHeader(fast, ctxWithHeaders(nil))
 	assert.Equal(t, want, fast.UserContent)
 }
 
@@ -73,7 +102,7 @@ func TestApplyCurrentMessageHeader_BadValuesAreIgnored(t *testing.T) {
 			fast, err := extractContentFast([]byte(memoryAugmentedBody))
 			require.NoError(t, err)
 			want := fast.UserContent
-			applyCurrentMessageHeader(fast, ctxWithHeaders(map[string]string{headers.MemBoxCurrentMessage: value}))
+			newRouterWithCurrentMessageHeader(true).applyCurrentMessageHeader(fast, ctxWithHeaders(map[string]string{headers.MemBoxCurrentMessage: value}))
 			assert.Equal(t, want, fast.UserContent)
 		})
 	}
@@ -85,13 +114,13 @@ func TestApplyCurrentMessageHeader_AcceptsUnpaddedAndMixedCaseName(t *testing.T)
 
 	unpadded := base64.RawStdEncoding.EncodeToString([]byte("多轮对话：住哪里？\nsecond line"))
 	ctx := ctxWithHeaders(map[string]string{"X-MemBox-Current-Message": unpadded})
-	applyCurrentMessageHeader(fast, ctx)
+	newRouterWithCurrentMessageHeader(true).applyCurrentMessageHeader(fast, ctx)
 
 	assert.Equal(t, "多轮对话：住哪里？\nsecond line", fast.UserContent)
 }
 
 func TestExtractFastRequestState_HeaderOverridesBothProtocols(t *testing.T) {
-	router := newTestRouter()
+	router := newRouterWithCurrentMessageHeader(true)
 	header := map[string]string{headers.MemBoxCurrentMessage: b64("where should I stay?")}
 
 	openAICtx := ctxWithHeaders(header)

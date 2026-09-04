@@ -173,14 +173,15 @@ type LLMObservability struct {
 }
 
 type RouterOptions struct {
-	AutoModelName             string               `yaml:"auto_model_name,omitempty"`
-	AutoModelNames            []string             `yaml:"auto_model_names,omitempty"`
-	IncludeConfigModelsInList bool                 `yaml:"include_config_models_in_list,omitempty"`
-	ClearRouteCache           bool                 `yaml:"clear_route_cache"`
-	StreamedBodyMode          bool                 `yaml:"streamed_body_mode,omitempty"`
-	MaxStreamedBodyBytes      int64                `yaml:"max_streamed_body_bytes,omitempty"`
-	StreamedBodyTimeoutSec    int                  `yaml:"streamed_body_timeout_sec,omitempty"`
-	SkipProcessing            SkipProcessingConfig `yaml:"skip_processing,omitempty"`
+	AutoModelName             string                     `yaml:"auto_model_name,omitempty"`
+	AutoModelNames            []string                   `yaml:"auto_model_names,omitempty"`
+	IncludeConfigModelsInList bool                       `yaml:"include_config_models_in_list,omitempty"`
+	ClearRouteCache           bool                       `yaml:"clear_route_cache"`
+	StreamedBodyMode          bool                       `yaml:"streamed_body_mode,omitempty"`
+	MaxStreamedBodyBytes      int64                      `yaml:"max_streamed_body_bytes,omitempty"`
+	StreamedBodyTimeoutSec    int                        `yaml:"streamed_body_timeout_sec,omitempty"`
+	SkipProcessing            SkipProcessingConfig       `yaml:"skip_processing,omitempty"`
+	CurrentMessageHeader      CurrentMessageHeaderConfig `yaml:"current_message_header,omitempty"`
 }
 
 // SkipProcessingConfig gates the x-vsr-skip-processing request header.
@@ -191,6 +192,16 @@ type SkipProcessingConfig struct {
 // IsEnabled reports whether the x-vsr-skip-processing opt-out is honored.
 func (s SkipProcessingConfig) IsEnabled() bool {
 	return s.Enabled
+}
+
+// CurrentMessageHeaderConfig gates the x-membox-current-message request header.
+type CurrentMessageHeaderConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// IsEnabled reports whether x-membox-current-message is honored as the current user turn.
+func (c CurrentMessageHeaderConfig) IsEnabled() bool {
+	return c.Enabled
 }
 
 // InlineModels captures built-in model families and prompt-processing settings.

@@ -19,16 +19,17 @@ type CanonicalGlobal struct {
 
 // CanonicalRouterGlobal captures router-engine control knobs.
 type CanonicalRouterGlobal struct {
-	ConfigSource              ConfigSource          `yaml:"config_source,omitempty"`
-	Strategy                  string                `yaml:"strategy,omitempty"`
-	AutoModelName             string                `yaml:"auto_model_name,omitempty"`
-	AutoModelNames            []string              `yaml:"auto_model_names,omitempty"`
-	IncludeConfigModelsInList bool                  `yaml:"include_config_models_in_list"`
-	ClearRouteCache           bool                  `yaml:"clear_route_cache"`
-	StreamedBody              CanonicalStreamedBody `yaml:"streamed_body"`
-	SkipProcessing            SkipProcessingConfig  `yaml:"skip_processing"`
-	ModelSelection            ModelSelectionConfig  `yaml:"model_selection"`
-	Learning                  RouterLearningConfig  `yaml:"learning,omitempty"`
+	ConfigSource              ConfigSource               `yaml:"config_source,omitempty"`
+	Strategy                  string                     `yaml:"strategy,omitempty"`
+	AutoModelName             string                     `yaml:"auto_model_name,omitempty"`
+	AutoModelNames            []string                   `yaml:"auto_model_names,omitempty"`
+	IncludeConfigModelsInList bool                       `yaml:"include_config_models_in_list"`
+	ClearRouteCache           bool                       `yaml:"clear_route_cache"`
+	StreamedBody              CanonicalStreamedBody      `yaml:"streamed_body"`
+	SkipProcessing            SkipProcessingConfig       `yaml:"skip_processing"`
+	CurrentMessageHeader      CurrentMessageHeaderConfig `yaml:"current_message_header,omitempty"`
+	ModelSelection            ModelSelectionConfig       `yaml:"model_selection"`
+	Learning                  RouterLearningConfig       `yaml:"learning,omitempty"`
 }
 
 // CanonicalStreamedBody groups streaming request body controls.
@@ -218,6 +219,7 @@ func applyCanonicalGlobal(cfg *RouterConfig, global *CanonicalGlobal) error {
 	cfg.MaxStreamedBodyBytes = global.Router.StreamedBody.MaxBytes
 	cfg.StreamedBodyTimeoutSec = global.Router.StreamedBody.TimeoutSec
 	cfg.SkipProcessing = global.Router.SkipProcessing
+	cfg.CurrentMessageHeader = global.Router.CurrentMessageHeader
 	cfg.ModelSelection = global.Router.ModelSelection
 	cfg.RouterLearning = global.Router.Learning
 
