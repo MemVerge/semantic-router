@@ -619,6 +619,28 @@ pub extern "C" fn is_mmbert_model(config_path: *const c_char) -> bool {
 // Reference: https://huggingface.co/llm-semantic-router/mmbert-32k-yarn
 // ============================================================================
 
+/// One forward before the model is published, for the reason `ffi/complexity.rs` gives. ~600 tokens
+/// because these truncate at `MAX_CLASSIFICATION_SEQ_LEN` (512) despite the 32K name.
+fn warm_up_mmbert_32k_classifier(
+    model: &crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier,
+    label: &str,
+) -> bool {
+    let warmup = "Explain the trade-offs between eventual and strong consistency in a \
+                  distributed database, with examples. "
+        .repeat(40);
+    let started = std::time::Instant::now();
+    if let Err(e) = model.classify_text(&warmup) {
+        eprintln!("   ✗ {} warm-up forward failed: {}", label, e);
+        return false;
+    }
+    eprintln!(
+        "   {} warm-up forward took {} ms",
+        label,
+        started.elapsed().as_millis()
+    );
+    true
+}
+
 /// Initialize mmBERT-32K intent classifier
 ///
 /// Model classifies text into MMLU-Pro academic categories for request routing.
@@ -651,6 +673,9 @@ pub extern "C" fn init_mmbert_32k_intent_classifier(
     ) {
         Ok(model) => {
             eprintln!("   mmBERT-32K intent classifier loaded (32K context, YaRN RoPE)");
+            if !warm_up_mmbert_32k_classifier(&model, "mmBERT-32K intent classifier") {
+                return false;
+            }
             MMBERT_32K_INTENT_CLASSIFIER.set(Arc::new(model)).is_ok()
         }
         Err(e) => {
@@ -693,6 +718,9 @@ pub extern "C" fn init_mmbert_32k_factcheck_classifier(
     ) {
         Ok(model) => {
             eprintln!("   mmBERT-32K fact-check classifier loaded");
+            if !warm_up_mmbert_32k_classifier(&model, "mmBERT-32K fact-check classifier") {
+                return false;
+            }
             MMBERT_32K_FACTCHECK_CLASSIFIER.set(Arc::new(model)).is_ok()
         }
         Err(e) => {
