@@ -17,7 +17,42 @@ use crate::test_fixtures::fixtures::{
 use rstest::*;
 use serial_test::serial;
 use std::ffi::CString;
+use std::process::Command;
 use std::sync::Once;
+
+#[test]
+fn test_cuda_request_checks_device_before_idempotent_embedding_init() {
+    const CHILD_PROCESS: &str = "SR_TEST_EMBEDDING_CUDA_REINIT_CHILD";
+    if std::env::var_os(CHILD_PROCESS).is_none() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ffi::embedding_test::test_cuda_request_checks_device_before_idempotent_embedding_init",
+                "--nocapture",
+            ])
+            .env(CHILD_PROCESS, "1")
+            .env("CUDA_VISIBLE_DEVICES", "")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "child process rejected the device contract"
+        );
+        return;
+    }
+
+    assert!(GLOBAL_MODEL_FACTORY
+        .set(
+            crate::model_architectures::model_factory::ModelFactory::new(candle_core::Device::Cpu,)
+        )
+        .is_ok());
+    assert!(!init_embedding_models_with_mmbert(
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        false,
+    ));
+}
 
 #[test]
 fn test_mmbert_batch_embedding_rejects_invalid_abi_inputs_before_model_access() {
