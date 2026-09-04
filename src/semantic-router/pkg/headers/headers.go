@@ -37,6 +37,16 @@ const (
 	// Example use case: App with Mem0 sends this header to prevent duplicate memory injection.
 	DisableRouterMemory = "x-disable-router-memory"
 
+	// MemBoxCurrentMessage lets a client name the current user turn explicitly.
+	// Value: base64 (standard alphabet, padding optional) of the UTF-8 text of
+	// the turn the user typed. When present and valid it replaces the
+	// body-derived UserContent for every request signal (decision evaluation,
+	// RAG, semantic cache, modality); the body itself is forwarded unchanged.
+	// Clients that inject memories or prior turns into the last user message
+	// (MemBox) send it so routing keys off the user's words, not the injected
+	// context. Stripped before the request reaches the upstream provider.
+	MemBoxCurrentMessage = "x-membox-current-message"
+
 	// SelectedModel indicates the model that was selected by the router for processing.
 	// This header is set during the routing decision phase.
 	SelectedModel = "x-selected-model"
