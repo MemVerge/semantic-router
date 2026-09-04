@@ -3,6 +3,7 @@
 package candle_binding
 
 import (
+	"fmt"
 	"log"
 	"runtime"
 	"strings"
@@ -349,6 +350,21 @@ func GetEmbedding2DMatryoshka(text string, modelType string, targetLayer int, ta
 		SequenceLength:   10,
 		ProcessingTimeMs: 1.0,
 	}, nil
+}
+
+func EncodeMmBert32KTextBatch(texts []string, targetDim int) ([][]float32, error) {
+	dimensions := targetDim
+	if dimensions <= 0 {
+		dimensions = 768
+	}
+	results := make([][]float32, len(texts))
+	for i := range results {
+		results[i] = make([]float32, dimensions)
+		for j := range results[i] {
+			results[i][j] = 0.1
+		}
+	}
+	return results, nil
 }
 
 // CalculateSimilarity calculates the similarity between two texts
@@ -703,6 +719,14 @@ func ClassifyMmBert32KIntent(text string) (ClassResult, error) {
 	return ClassResult{Class: 0, Confidence: 0.95}, nil
 }
 
+func ClassifyMmBert32KIntentBatch(texts []string) ([]ClassResult, error) {
+	results := make([]ClassResult, len(texts))
+	for i := range results {
+		results[i] = ClassResult{Class: 0, Confidence: 0.95}
+	}
+	return results, nil
+}
+
 // InitMmBert32KFactcheckClassifier initializes mmBERT-32K fact-check classifier
 func InitMmBert32KFactcheckClassifier(modelPath string, useCPU bool) error {
 	log.Printf("[MOCK] Initializing mmBERT-32K Factcheck Classifier: %s", modelPath)
@@ -714,6 +738,14 @@ func InitMmBert32KFactcheckClassifier(modelPath string, useCPU bool) error {
 func ClassifyMmBert32KFactcheck(text string) (ClassResult, error) {
 	_ = text
 	return ClassResult{Class: 1, Confidence: 0.90}, nil
+}
+
+func ClassifyMmBert32KFactcheckBatch(texts []string) ([]ClassResult, error) {
+	results := make([]ClassResult, len(texts))
+	for i := range results {
+		results[i] = ClassResult{Class: 1, Confidence: 0.90}
+	}
+	return results, nil
 }
 
 // InitMmBert32KJailbreakClassifier initializes mmBERT-32K jailbreak classifier
@@ -813,6 +845,14 @@ func InitComplexityClassifier(modelPath string, useCPU bool) error {
 // ClassifyComplexityText classifies text for reasoning complexity (mock).
 func ClassifyComplexityText(text string) (ClassResult, error) {
 	return ClassResult{Class: 0, Confidence: 0.99}, nil
+}
+
+func ClassifyComplexityTextBatch(texts []string) ([]ClassResult, error) {
+	results := make([]ClassResult, len(texts))
+	for i := range results {
+		results[i] = ClassResult{Class: 0, Confidence: 0.99}
+	}
+	return results, nil
 }
 
 // FeedbackResult represents the result of feedback detection

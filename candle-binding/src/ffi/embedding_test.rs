@@ -19,6 +19,57 @@ use serial_test::serial;
 use std::ffi::CString;
 use std::sync::Once;
 
+#[test]
+fn test_mmbert_batch_embedding_rejects_invalid_abi_inputs_before_model_access() {
+    let text = CString::new("one row").unwrap();
+    let texts = [text.as_ptr()];
+    let null_texts = [std::ptr::null()];
+    let invalid_utf8 = [0xff_u8, 0];
+    let invalid_texts = [invalid_utf8.as_ptr().cast::<std::ffi::c_char>()];
+    let mut result = crate::ffi::types::MmBertBatchEmbeddingResult::default();
+
+    unsafe {
+        assert_eq!(
+            encode_mmbert_32k_text_embedding_batch(texts.as_ptr(), 1, 0, std::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(
+            encode_mmbert_32k_text_embedding_batch(std::ptr::null(), 1, 0, &mut result,),
+            -1
+        );
+        assert_eq!(
+            encode_mmbert_32k_text_embedding_batch(null_texts.as_ptr(), 1, 0, &mut result),
+            -1
+        );
+        assert_eq!(
+            encode_mmbert_32k_text_embedding_batch(invalid_texts.as_ptr(), 1, 0, &mut result),
+            -1
+        );
+        assert_eq!(
+            encode_mmbert_32k_text_embedding_batch(texts.as_ptr(), -1, 0, &mut result),
+            -1
+        );
+    }
+}
+
+#[test]
+fn test_flatten_mmbert_batch_embeddings_preserves_row_major_order_and_width() {
+    let rows = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+
+    let (flat, dimensions) = flatten_mmbert_batch_embeddings(rows, 2, Some(2)).unwrap();
+
+    assert_eq!(dimensions, 2);
+    assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn test_flatten_mmbert_batch_embeddings_rejects_malformed_shapes() {
+    assert!(flatten_mmbert_batch_embeddings(vec![], 1, None).is_err());
+    assert!(flatten_mmbert_batch_embeddings(vec![vec![]], 1, None).is_err());
+    assert!(flatten_mmbert_batch_embeddings(vec![vec![1.0], vec![2.0, 3.0]], 2, None).is_err());
+    assert!(flatten_mmbert_batch_embeddings(vec![vec![1.0, 2.0]], 1, Some(1)).is_err());
+}
+
 /// Global initializer to ensure ModelFactory is initialized once
 static INIT: Once = Once::new();
 

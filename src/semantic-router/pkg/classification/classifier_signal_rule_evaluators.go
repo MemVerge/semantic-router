@@ -1,6 +1,7 @@
 package classification
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -54,7 +55,44 @@ func (c *Classifier) evaluateDomainSignal(results *SignalResults, mu *sync.Mutex
 			err = nil
 		}
 	}
-	elapsed := time.Since(start)
+	c.recordDomainSignalResult(results, mu, domainResult, err, time.Since(start))
+}
+
+func (c *Classifier) evaluateDomainSignalsBatch(rows []*signalEvaluationRow) {
+	batchInference, ok := c.categoryInference.(CategoryBatchInference)
+	if !ok {
+		for _, row := range rows {
+			c.evaluateDomainSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeDomain))
+		}
+		return
+	}
+
+	texts := make([]string, len(rows))
+	for i, row := range rows {
+		texts[i] = row.textForSignal(config.SignalTypeDomain)
+	}
+	started := time.Now()
+	classResults, err := batchInference.ClassifyBatch(texts)
+	elapsed := time.Since(started)
+	if err == nil && len(classResults) != len(rows) {
+		err = fmt.Errorf("domain model batch returned %d results for %d inputs", len(classResults), len(rows))
+	}
+	if err != nil {
+		logging.Errorf("domain model batch classification failed: %v", err)
+		for _, row := range rows {
+			c.recordDomainSignalResult(row.results, &row.mu, candle_binding.ClassResultWithProbs{}, err, elapsed)
+		}
+		return
+	}
+	for i, row := range rows {
+		c.recordDomainSignalResult(row.results, &row.mu, candle_binding.ClassResultWithProbs{
+			Class:      classResults[i].Class,
+			Confidence: classResults[i].Confidence,
+		}, nil, elapsed)
+	}
+}
+
+func (c *Classifier) recordDomainSignalResult(results *SignalResults, mu *sync.Mutex, domainResult candle_binding.ClassResultWithProbs, err error, elapsed time.Duration) {
 	latencySeconds := elapsed.Seconds()
 
 	categoryName := ""
@@ -90,7 +128,33 @@ func (c *Classifier) evaluateDomainSignal(results *SignalResults, mu *sync.Mutex
 func (c *Classifier) evaluateFactCheckSignal(results *SignalResults, mu *sync.Mutex, text string) {
 	start := time.Now()
 	factCheckResult, err := c.ClassifyFactCheck(text)
-	elapsed := time.Since(start)
+	c.recordFactCheckSignalResult(results, mu, factCheckResult, err, time.Since(start))
+}
+
+func (c *Classifier) evaluateFactCheckSignalsBatch(rows []*signalEvaluationRow) {
+	texts := make([]string, len(rows))
+	for i, row := range rows {
+		texts[i] = row.textForSignal(config.SignalTypeFactCheck)
+	}
+	started := time.Now()
+	factCheckResults, err := c.ClassifyFactCheckBatch(texts)
+	elapsed := time.Since(started)
+	if err == nil && len(factCheckResults) != len(rows) {
+		err = fmt.Errorf("fact-check model batch returned %d results for %d inputs", len(factCheckResults), len(rows))
+	}
+	if err != nil {
+		logging.Errorf("fact-check model batch classification failed: %v", err)
+		for _, row := range rows {
+			c.recordFactCheckSignalResult(row.results, &row.mu, nil, err, elapsed)
+		}
+		return
+	}
+	for i, row := range rows {
+		c.recordFactCheckSignalResult(row.results, &row.mu, factCheckResults[i], nil, elapsed)
+	}
+}
+
+func (c *Classifier) recordFactCheckSignalResult(results *SignalResults, mu *sync.Mutex, factCheckResult *FactCheckResult, err error, elapsed time.Duration) {
 	latencySeconds := elapsed.Seconds()
 
 	// Determine which signal to output based on classification result

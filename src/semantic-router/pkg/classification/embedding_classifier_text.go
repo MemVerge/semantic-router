@@ -87,3 +87,66 @@ func (c *EmbeddingClassifier) ClassifyDetailed(text string) (*EmbeddingClassific
 		Matches: matched,
 	}, nil
 }
+
+func (c *EmbeddingClassifier) ClassifyDetailedBatch(texts []string) ([]*EmbeddingClassificationResult, error) {
+	if len(c.rules) == 0 {
+		results := make([]*EmbeddingClassificationResult, len(texts))
+		for i := range results {
+			results[i] = &EmbeddingClassificationResult{}
+		}
+		return results, nil
+	}
+	for _, text := range texts {
+		if text == "" {
+			return nil, fmt.Errorf("embedding similarity classification: query must be provided")
+		}
+	}
+
+	textRules := c.rulesByModality[config.QueryModalityText]
+	if len(textRules) == 0 {
+		results := make([]*EmbeddingClassificationResult, len(texts))
+		for i := range results {
+			results[i] = &EmbeddingClassificationResult{}
+		}
+		return results, nil
+	}
+
+	modelType := c.getModelType()
+	if c.getBackend() != "candle" || modelType != "mmbert" {
+		results := make([]*EmbeddingClassificationResult, len(texts))
+		for i, text := range texts {
+			result, err := c.ClassifyDetailed(text)
+			if err != nil {
+				return nil, err
+			}
+			results[i] = result
+		}
+		return results, nil
+	}
+
+	started := time.Now()
+	embeddings, err := encodeMmBert32KTextBatch(texts, c.optimizationConfig.TargetDimension)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute query embedding batch: %w", err)
+	}
+	if len(embeddings) != len(texts) {
+		return nil, fmt.Errorf("embedding model batch returned %d results for %d inputs", len(embeddings), len(texts))
+	}
+	if err := c.ensureCandidateEmbeddings(); err != nil {
+		return nil, err
+	}
+
+	results := make([]*EmbeddingClassificationResult, len(texts))
+	for i, embedding := range embeddings {
+		scoredRules, scoreErr := c.scoreRulesSlice(embedding, textRules)
+		if scoreErr != nil {
+			return nil, scoreErr
+		}
+		results[i] = &EmbeddingClassificationResult{
+			Scores:  scoredRules,
+			Matches: c.findAllMatchedRules(scoredRules),
+		}
+	}
+	logging.Infof("ClassifyDetailedBatch completed in %v: %d rows (modality=text)", time.Since(started), len(texts))
+	return results, nil
+}

@@ -118,6 +118,12 @@ typedef struct {
     float processing_time_ms; // Processing time in milliseconds
 } EmbeddingResult;
 
+typedef struct {
+    float* data;
+    int rows;
+    int dimensions;
+} MmBertBatchEmbeddingResult;
+
 // Embedding similarity result structure
 typedef struct {
     float similarity;         // Cosine similarity score (-1.0 to 1.0)
@@ -237,6 +243,8 @@ extern int get_embedding_batched(const char* text, const char* model_type, int t
 extern bool init_embedding_models(const char* qwen3_model_path, const char* gemma_model_path, bool use_cpu);
 extern bool init_embedding_models_with_mmbert(const char* qwen3_model_path, const char* gemma_model_path, const char* mmbert_model_path, bool use_cpu);
 extern bool init_mmbert_embedding_model(const char* model_path, bool use_cpu);
+extern int encode_mmbert_32k_text_embedding_batch(const char** texts, int num_texts, int target_dim, MmBertBatchEmbeddingResult* result);
+extern void free_mmbert_32k_text_embedding_batch(MmBertBatchEmbeddingResult* result);
 extern bool init_multimodal_embedding_model(const char* model_path, bool use_cpu);
 extern bool init_embedding_models_batched(const char* qwen3_model_path, int max_batch_size, unsigned long long max_wait_ms, bool use_cpu);
 extern int calculate_embedding_similarity(const char* text1, const char* text2, const char* model_type, int target_dim, EmbeddingSimilarityResult* result);
@@ -279,10 +287,13 @@ extern ClassificationResult classify_deberta_jailbreak_text(const char* text);
 extern ModernBertClassificationResult classify_fact_check_text(const char* text);
 extern ModernBertClassificationResult classify_feedback_text(const char* text);
 extern ModernBertClassificationResult classify_complexity_text(const char* text);
+extern int classify_complexity_text_batch(const char** texts, int num_texts, ModernBertClassificationResult* results);
 
 // mmBERT-32K classification functions (32K context, YaRN RoPE scaling)
 extern ModernBertClassificationResult classify_mmbert_32k_intent(const char* text);
 extern ModernBertClassificationResult classify_mmbert_32k_factcheck(const char* text);
+extern int classify_mmbert_32k_intent_batch(const char** texts, int num_texts, ModernBertClassificationResult* results);
+extern int classify_mmbert_32k_factcheck_batch(const char** texts, int num_texts, ModernBertClassificationResult* results);
 extern ModernBertClassificationResult classify_mmbert_32k_jailbreak(const char* text);
 extern ModernBertClassificationResult classify_mmbert_32k_feedback(const char* text);
 extern ModernBertTokenClassificationResult classify_mmbert_32k_pii_tokens(const char* text);
@@ -504,6 +515,57 @@ type ClassResult struct {
 	Class      int      // Class index
 	Confidence float32  // Confidence score
 	Categories []string // Violation categories (e.g., "Violent", "Jailbreak") - only populated when unsafe/controversial
+}
+
+type modernBertBatchClassifier func(
+	texts **C.char,
+	numTexts C.int,
+	results *C.ModernBertClassificationResult,
+) C.int
+
+// C.CString copies the Go string as-is, so a row behaves exactly as it does on the scalar path:
+// the native side stops at an embedded NUL, and a row it cannot read comes back as Class -1 in that
+// row's own slot rather than failing the wave.
+func makeBatchCStrings(texts []string) ([]*C.char, func()) {
+	cTexts := make([]*C.char, len(texts))
+	for i, text := range texts {
+		cTexts[i] = C.CString(text)
+	}
+	return cTexts, func() {
+		for _, text := range cTexts {
+			C.free(unsafe.Pointer(text))
+		}
+	}
+}
+
+func classifyModernBertTextBatch(
+	texts []string,
+	modelName string,
+	classify modernBertBatchClassifier,
+) ([]ClassResult, error) {
+	if len(texts) == 0 {
+		return []ClassResult{}, nil
+	}
+	cTexts, cleanup := makeBatchCStrings(texts)
+	defer cleanup()
+
+	cResults := make([]C.ModernBertClassificationResult, len(texts))
+	written := classify(
+		(**C.char)(unsafe.Pointer(&cTexts[0])),
+		C.int(len(cTexts)),
+		&cResults[0],
+	)
+	if int(written) != len(texts) {
+		return nil, fmt.Errorf("%s batch classification failed: wrote %d of %d rows", modelName, int(written), len(texts))
+	}
+
+	// Class < 0 is a per-row failure and stays one: callers degrade that row alone. An error here
+	// would mean the whole wave, which only the count check above can establish.
+	results := make([]ClassResult, len(cResults))
+	for i, result := range cResults {
+		results[i] = ClassResult{Class: int(result.class), Confidence: float32(result.confidence)}
+	}
+	return results, nil
 }
 
 // ClassResultWithProbs represents the result of a text classification with full probability distribution
@@ -1578,6 +1640,42 @@ func GetEmbedding2DMatryoshka(text string, modelType string, targetLayer int, ta
 	}, nil
 }
 
+func EncodeMmBert32KTextBatch(texts []string, targetDim int) ([][]float32, error) {
+	if len(texts) == 0 {
+		return [][]float32{}, nil
+	}
+	cTexts, cleanup := makeBatchCStrings(texts)
+	defer cleanup()
+
+	cTargetDim := C.int(0)
+	if targetDim > 0 {
+		cTargetDim = C.int(targetDim)
+	}
+	var result C.MmBertBatchEmbeddingResult
+	status := C.encode_mmbert_32k_text_embedding_batch(
+		(**C.char)(unsafe.Pointer(&cTexts[0])),
+		C.int(len(cTexts)),
+		cTargetDim,
+		&result,
+	)
+	defer C.free_mmbert_32k_text_embedding_batch(&result)
+	if status != 0 {
+		return nil, fmt.Errorf("mmBERT-32K embedding batch failed with status %d", int(status))
+	}
+
+	rows, dimensions := int(result.rows), int(result.dimensions)
+	if rows != len(texts) || dimensions <= 0 || result.data == nil {
+		return nil, fmt.Errorf("mmBERT-32K embedding batch returned invalid shape %dx%d for %d rows", rows, dimensions, len(texts))
+	}
+	flat := unsafe.Slice((*float32)(result.data), rows*dimensions)
+	embeddings := make([][]float32, rows)
+	for row := 0; row < rows; row++ {
+		embeddings[row] = make([]float32, dimensions)
+		copy(embeddings[row], flat[row*dimensions:(row+1)*dimensions])
+	}
+	return embeddings, nil
+}
+
 // CalculateSimilarity calculates the similarity between two texts with maxLength parameter
 func CalculateSimilarity(text1, text2 string, maxLength int) float32 {
 	if !modelInitialized {
@@ -2347,6 +2445,16 @@ func ClassifyMmBert32KIntent(text string) (ClassResult, error) {
 	}, nil
 }
 
+func ClassifyMmBert32KIntentBatch(texts []string) ([]ClassResult, error) {
+	return classifyModernBertTextBatch(texts, "mmBERT-32K intent", func(
+		cTexts **C.char,
+		numTexts C.int,
+		results *C.ModernBertClassificationResult,
+	) C.int {
+		return C.classify_mmbert_32k_intent_batch(cTexts, numTexts, results)
+	})
+}
+
 // InitMmBert32KFactcheckClassifier initializes the mmBERT-32K fact-check classifier
 // This model determines if text needs fact-checking.
 // Outputs: 0=NO_FACT_CHECK_NEEDED, 1=FACT_CHECK_NEEDED
@@ -2389,6 +2497,16 @@ func ClassifyMmBert32KFactcheck(text string) (ClassResult, error) {
 		Class:      int(result.class),
 		Confidence: float32(result.confidence),
 	}, nil
+}
+
+func ClassifyMmBert32KFactcheckBatch(texts []string) ([]ClassResult, error) {
+	return classifyModernBertTextBatch(texts, "mmBERT-32K fact-check", func(
+		cTexts **C.char,
+		numTexts C.int,
+		results *C.ModernBertClassificationResult,
+	) C.int {
+		return C.classify_mmbert_32k_factcheck_batch(cTexts, numTexts, results)
+	})
 }
 
 // InitMmBert32KJailbreakClassifier initializes the mmBERT-32K jailbreak detector
@@ -2737,6 +2855,19 @@ func ClassifyComplexityText(text string) (ClassResult, error) {
 		Class:      int(result.class),
 		Confidence: float32(result.confidence),
 	}, nil
+}
+
+func ClassifyComplexityTextBatch(texts []string) ([]ClassResult, error) {
+	if complexityClassifierInitErr != nil {
+		return nil, fmt.Errorf("complexity classifier not initialized: %v", complexityClassifierInitErr)
+	}
+	return classifyModernBertTextBatch(texts, "complexity", func(
+		cTexts **C.char,
+		numTexts C.int,
+		results *C.ModernBertClassificationResult,
+	) C.int {
+		return C.classify_complexity_text_batch(cTexts, numTexts, results)
+	})
 }
 
 // InitFeedbackDetector initializes the feedback detector classifier

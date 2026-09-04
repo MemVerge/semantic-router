@@ -9,6 +9,7 @@
 use std::ffi::{c_char, CStr};
 use std::sync::{Arc, OnceLock};
 
+use crate::ffi::classify::classify_modernbert_text_batch;
 use crate::ffi::types::ModernBertClassificationResult;
 use crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier;
 
@@ -115,4 +116,22 @@ pub extern "C" fn classify_complexity_text(text: *const c_char) -> ModernBertCla
         eprintln!("Complexity classifier not initialized - call init_complexity_classifier first");
         default_result
     }
+}
+
+/// # Safety
+///
+/// The pointer arguments must name readable and writable arrays matching their counts.
+#[no_mangle]
+pub unsafe extern "C" fn classify_complexity_text_batch(
+    texts: *const *const c_char,
+    num_texts: i32,
+    results: *mut ModernBertClassificationResult,
+) -> i32 {
+    classify_modernbert_text_batch(
+        COMPLEXITY_CLASSIFIER.get().map(Arc::as_ref),
+        texts,
+        num_texts,
+        results,
+        "complexity",
+    )
 }

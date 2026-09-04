@@ -15,9 +15,12 @@
 //! through the element pointer is reported as a layout mismatch and fails the
 //! test; the full-length `slice_from_raw_parts_mut` form passes.
 
-use super::embedding::{free_batch_similarity_result, free_embedding_models_info};
+use super::embedding::{
+    free_batch_similarity_result, free_embedding_models_info, free_mmbert_32k_text_embedding_batch,
+};
 use super::types::{
-    BatchSimilarityResult, EmbeddingModelInfo, EmbeddingModelsInfoResult, SimilarityMatch,
+    BatchSimilarityResult, EmbeddingModelInfo, EmbeddingModelsInfoResult,
+    MmBertBatchEmbeddingResult, SimilarityMatch,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -239,4 +242,32 @@ fn test_free_embedding_models_info_uses_full_slice_layout() {
     );
     assert!(result.models.is_null());
     assert_eq!(result.num_models, 0);
+}
+
+#[test]
+fn test_free_mmbert_batch_embedding_uses_full_row_major_layout() {
+    let _guard = WINDOW_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    const ROWS: usize = 3;
+    const DIMENSIONS: usize = 4;
+
+    arm();
+    let values = vec![0.5_f32; ROWS * DIMENSIONS];
+    let data = Box::into_raw(values.into_boxed_slice()) as *mut f32;
+    let mut result = MmBertBatchEmbeddingResult {
+        data,
+        rows: ROWS as i32,
+        dimensions: DIMENSIONS as i32,
+    };
+    unsafe { free_mmbert_32k_text_embedding_batch(&mut result) };
+    let report = disarm();
+
+    assert_full_layout_free(
+        &report,
+        data as usize,
+        ROWS * DIMENSIONS * std::mem::size_of::<f32>(),
+        "MmBertBatchEmbeddingResult.data array",
+    );
+    assert!(result.data.is_null());
+    assert_eq!(result.rows, 0);
+    assert_eq!(result.dimensions, 0);
 }

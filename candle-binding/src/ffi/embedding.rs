@@ -5,7 +5,8 @@
 
 use crate::classifiers::unified::{DualPathUnifiedClassifier, EmbeddingRequirements};
 use crate::ffi::types::{
-    BatchSimilarityResult, EmbeddingResult, EmbeddingSimilarityResult, SimilarityMatch,
+    BatchSimilarityResult, EmbeddingResult, EmbeddingSimilarityResult, MmBertBatchEmbeddingResult,
+    SimilarityMatch,
 };
 use crate::model_architectures::ModelType;
 use std::ffi::{c_char, CStr};
@@ -792,6 +793,140 @@ fn generate_mmbert_embeddings_batch(
     embeddings
         .to_vec2::<f32>()
         .map_err(|e| format!("Failed to convert embeddings: {:?}", e))
+}
+
+pub(crate) fn flatten_mmbert_batch_embeddings(
+    rows: Vec<Vec<f32>>,
+    expected_rows: usize,
+    target_dimension: Option<usize>,
+) -> Result<(Vec<f32>, usize), &'static str> {
+    if rows.len() != expected_rows {
+        return Err("embedding model returned the wrong number of rows");
+    }
+    let dimensions = rows.first().map(Vec::len).unwrap_or(0);
+    if dimensions == 0 {
+        return Err("embedding model returned an empty row");
+    }
+    if target_dimension.is_some_and(|target| target != dimensions) {
+        return Err("embedding model returned the wrong target dimension");
+    }
+    if rows.iter().any(|row| row.len() != dimensions) {
+        return Err("embedding model returned inconsistent row dimensions");
+    }
+
+    let length = expected_rows
+        .checked_mul(dimensions)
+        .ok_or("embedding batch dimensions overflow")?;
+    let mut flat = Vec::with_capacity(length);
+    for row in rows {
+        flat.extend(row);
+    }
+    Ok((flat, dimensions))
+}
+
+/// # Safety
+///
+/// `texts` must name `num_texts` readable C-string pointers and `result` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn encode_mmbert_32k_text_embedding_batch(
+    texts: *const *const c_char,
+    num_texts: i32,
+    target_dim: i32,
+    result: *mut MmBertBatchEmbeddingResult,
+) -> i32 {
+    if result.is_null() {
+        eprintln!("mmBERT embedding batch received a null result");
+        return -1;
+    }
+    *result = MmBertBatchEmbeddingResult::default();
+    if num_texts < 0 {
+        eprintln!("mmBERT embedding batch received a negative row count");
+        return -1;
+    }
+    if num_texts == 0 {
+        return 0;
+    }
+    if texts.is_null() {
+        eprintln!("mmBERT embedding batch received a null text array");
+        return -1;
+    }
+
+    let text_ptrs = std::slice::from_raw_parts(texts, num_texts as usize);
+    let mut text_rows = Vec::with_capacity(text_ptrs.len());
+    for text in text_ptrs {
+        if text.is_null() {
+            eprintln!("mmBERT embedding batch received a null text");
+            return -1;
+        }
+        match CStr::from_ptr(*text).to_str() {
+            Ok(text) => text_rows.push(text),
+            Err(_) => {
+                eprintln!("mmBERT embedding batch received invalid UTF-8");
+                return -1;
+            }
+        }
+    }
+
+    let Some(factory) = GLOBAL_MODEL_FACTORY.get() else {
+        eprintln!("mmBERT embedding model not initialized");
+        return -1;
+    };
+    let target_dimension = (target_dim > 0).then_some(target_dim as usize);
+    let rows = match generate_mmbert_embeddings_batch(factory, &text_rows, None, target_dimension) {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!("mmBERT embedding batch failed: {}", error);
+            return -1;
+        }
+    };
+    let (flat, dimensions) =
+        match flatten_mmbert_batch_embeddings(rows, text_rows.len(), target_dimension) {
+            Ok(batch) => batch,
+            Err(error) => {
+                eprintln!("mmBERT embedding batch failed: {}", error);
+                return -1;
+            }
+        };
+    let dimensions = match i32::try_from(dimensions) {
+        Ok(dimensions) => dimensions,
+        Err(_) => {
+            eprintln!("mmBERT embedding dimension does not fit in i32");
+            return -1;
+        }
+    };
+
+    *result = MmBertBatchEmbeddingResult {
+        data: Box::into_raw(flat.into_boxed_slice()) as *mut f32,
+        rows: num_texts,
+        dimensions,
+    };
+    0
+}
+
+/// # Safety
+///
+/// `result` must be null or name an unfreed value returned by the matching encode function.
+#[no_mangle]
+pub unsafe extern "C" fn free_mmbert_32k_text_embedding_batch(
+    result: *mut MmBertBatchEmbeddingResult,
+) {
+    if result.is_null() {
+        return;
+    }
+    let result = &mut *result;
+    if !result.data.is_null() {
+        if result.rows <= 0 || result.dimensions <= 0 {
+            eprintln!("refusing to free an mmBERT embedding batch with invalid dimensions");
+            return;
+        }
+        let Some(length) = (result.rows as usize).checked_mul(result.dimensions as usize) else {
+            eprintln!("refusing to free an mmBERT embedding batch whose dimensions overflow");
+            return;
+        };
+        let data = std::ptr::slice_from_raw_parts_mut(result.data, length);
+        drop(Box::from_raw(data));
+    }
+    *result = MmBertBatchEmbeddingResult::default();
 }
 
 /// Internal helper to generate text embedding via the multi-modal model

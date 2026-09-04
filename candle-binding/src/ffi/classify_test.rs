@@ -4,8 +4,91 @@ use super::classify::*;
 use crate::ffi::types::*;
 use crate::test_fixtures::fixtures::*;
 use rstest::*;
-use std::ffi::{CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::ptr;
+
+#[test]
+fn test_modernbert_batch_exports_accept_an_empty_batch_without_a_model() {
+    let mut embedding = crate::ffi::types::MmBertBatchEmbeddingResult::default();
+
+    unsafe {
+        assert_eq!(
+            crate::ffi::complexity::classify_complexity_text_batch(
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+            ),
+            0
+        );
+        assert_eq!(
+            classify_mmbert_32k_intent_batch(ptr::null(), 0, ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            classify_mmbert_32k_factcheck_batch(ptr::null(), 0, ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            crate::ffi::embedding::encode_mmbert_32k_text_embedding_batch(
+                ptr::null(),
+                0,
+                0,
+                &mut embedding,
+            ),
+            0
+        );
+    }
+    assert!(embedding.data.is_null());
+    assert_eq!(embedding.rows, 0);
+    assert_eq!(embedding.dimensions, 0);
+}
+
+#[test]
+fn test_modernbert_batch_classifier_rejects_bad_pointer_inputs() {
+    let text = CString::new("one row").unwrap();
+    let texts = [text.as_ptr()];
+    let mut output = [ModernBertClassificationResult {
+        predicted_class: -1,
+        confidence: 0.0,
+    }];
+
+    unsafe {
+        assert_eq!(
+            classify_mmbert_32k_intent_batch(ptr::null(), 1, output.as_mut_ptr()),
+            -1
+        );
+        assert_eq!(
+            classify_mmbert_32k_intent_batch(texts.as_ptr(), 1, ptr::null_mut()),
+            -1
+        );
+        assert_eq!(
+            classify_mmbert_32k_intent_batch(texts.as_ptr(), -1, output.as_mut_ptr()),
+            -1
+        );
+    }
+}
+
+#[test]
+fn test_modernbert_batch_classifier_validates_every_c_string_before_model_access() {
+    let mut output = [ModernBertClassificationResult {
+        predicted_class: -1,
+        confidence: 0.0,
+    }];
+    let null_texts = [ptr::null()];
+    let invalid_utf8 = [0xff_u8, 0];
+    let invalid_texts = [invalid_utf8.as_ptr().cast::<c_char>()];
+
+    unsafe {
+        assert_eq!(
+            classify_mmbert_32k_factcheck_batch(null_texts.as_ptr(), 1, output.as_mut_ptr()),
+            -1
+        );
+        assert_eq!(
+            classify_mmbert_32k_factcheck_batch(invalid_texts.as_ptr(), 1, output.as_mut_ptr()),
+            -1
+        );
+    }
+}
 
 /// Test load_id2label_from_config function with real model
 #[rstest]
