@@ -26,6 +26,20 @@ func headerValueCI(ctx *RequestContext, canonical string) string {
 	return ""
 }
 
+// headerPresentCI reports whether a header with the canonical name is
+// present under any casing.
+func headerPresentCI(captured map[string]string, canonical string) bool {
+	if _, ok := captured[canonical]; ok {
+		return true
+	}
+	for k := range captured {
+		if strings.EqualFold(k, canonical) {
+			return true
+		}
+	}
+	return false
+}
+
 // authHeaderUserID returns the authenticated user id from the authz header.
 // Matching is case-insensitive on the header name: Envoy/HTTP2 may normalize
 // keys differently than our canonical constant, and direct map lookup would miss.

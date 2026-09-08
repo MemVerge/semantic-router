@@ -25,7 +25,12 @@ func (r *OpenAIRouter) handleToolSelectionForRequest(openAIRequest *openai.ChatC
 	userContent, nonUserMessages := extractUserAndNonUserContent(openAIRequest)
 	if ctx != nil && ctx.CurrentMessageFromHeader && ctx.UserContent != "" {
 		// The client named the current turn explicitly; select tools
-		// against it, not the injected context in the body.
+		// against it, not the injected context in the body — which is
+		// demoted to the history summary rather than dropped, matching
+		// applyCurrentMessageHeader.
+		if userContent != "" && userContent != ctx.UserContent {
+			nonUserMessages = append(nonUserMessages, userContent)
+		}
 		userContent = ctx.UserContent
 	}
 	if err := r.handleToolSelection(openAIRequest, userContent, nonUserMessages, &response, ctx); err != nil {

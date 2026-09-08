@@ -38,7 +38,7 @@ func (r *OpenAIRouter) handleRequestHeaders(v *ext_proc.ProcessingRequest_Reques
 	// also short-circuit in the no-op path.
 	if ctx.SkipProcessing {
 		detectStreamingExpectation(ctx)
-		return newContinueRequestHeadersResponse(stripClientOnlyRequestHeaders(nil)), nil
+		return newContinueRequestHeadersResponse(stripClientOnlyRequestHeaders(nil, ctx.Headers)), nil
 	}
 
 	if replayResp := r.handleRouterReplayAPI(method, path); replayResp != nil {
@@ -55,7 +55,7 @@ func (r *OpenAIRouter) handleRequestHeaders(v *ext_proc.ProcessingRequest_Reques
 	if validationResp := r.validateRequestHeaders(method, path); validationResp != nil {
 		return validationResp, nil
 	}
-	return newContinueRequestHeadersResponse(stripClientOnlyRequestHeaders(buildIdentityEncodingRequestMutation())), nil
+	return newContinueRequestHeadersResponse(stripClientOnlyRequestHeaders(buildIdentityEncodingRequestMutation(), ctx.Headers)), nil
 }
 
 func startRequestHeaderSpan(
@@ -187,13 +187,24 @@ func buildIdentityEncodingRequestMutation() *ext_proc.HeaderMutation {
 // path — routed, skip-processing, cache hit, error — is covered by one strip.
 var clientOnlyRequestHeaders = []string{headers.MemBoxCurrentMessage}
 
-// stripClientOnlyRequestHeaders adds the client-only header removals to
-// mutation, allocating one when nil is passed.
-func stripClientOnlyRequestHeaders(mutation *ext_proc.HeaderMutation) *ext_proc.HeaderMutation {
-	if mutation == nil {
-		mutation = &ext_proc.HeaderMutation{}
+// stripClientOnlyRequestHeaders adds a removal to mutation for each
+// client-only header the request actually carries. captured is ctx.Headers,
+// keyed by the header name as received, so presence is matched
+// case-insensitively — the same way the body phase reads the value — and the
+// canonical lower-case name is what goes in RemoveHeaders (Envoy removes
+// case-insensitively). It allocates a mutation only when there is something
+// to remove, so a request without any of them — every request on the
+// x-vsr-skip-processing fast path today — still gets a plain CONTINUE.
+func stripClientOnlyRequestHeaders(mutation *ext_proc.HeaderMutation, captured map[string]string) *ext_proc.HeaderMutation {
+	for _, name := range clientOnlyRequestHeaders {
+		if !headerPresentCI(captured, name) {
+			continue
+		}
+		if mutation == nil {
+			mutation = &ext_proc.HeaderMutation{}
+		}
+		mutation.RemoveHeaders = append(mutation.RemoveHeaders, name)
 	}
-	mutation.RemoveHeaders = append(mutation.RemoveHeaders, clientOnlyRequestHeaders...)
 	return mutation
 }
 

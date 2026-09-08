@@ -39,12 +39,15 @@ const (
 
 	// MemBoxCurrentMessage lets a client name the current user turn explicitly.
 	// Value: base64 (standard alphabet, padding optional) of the UTF-8 text of
-	// the turn the user typed. When present and valid it replaces the
-	// body-derived UserContent for every request signal (decision evaluation,
-	// RAG, tool selection, modality); the body itself is forwarded unchanged and
-	// the semantic cache keys off the body. Clients that inject memories or
-	// prior turns into the last user message (MemBox) send it so routing keys
-	// off the user's words, not the injected context. Honored only when
+	// the turn the user typed. When present and valid it becomes UserContent
+	// for every request signal (decision evaluation, RAG, tool selection,
+	// modality) and the body-derived last user message is demoted to the
+	// non-user history, where the history-aware signals still read it; the
+	// body itself is forwarded unchanged and the semantic cache keys off the
+	// body. Clients whose last user message is not the typed turn (MemBox
+	// sends the turn, the retrieved memories and a runtime-state block as
+	// separate user messages) send it so routing keys off the user's words,
+	// not the injected context. Honored only when
 	// global.router.current_message_header.enabled is true, because the caller
 	// then chooses the text the security signals evaluate. Stripped before the
 	// request reaches the upstream provider. The value counts against Envoy's

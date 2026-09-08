@@ -35,12 +35,22 @@ func (r *OpenAIRouter) currentMessageHeaderEnabled() bool {
 // holds the verbatim turn, so it sends it in x-membox-current-message
 // (base64 of the UTF-8 text) and the router uses that as UserContent.
 //
-// Only UserContent is replaced. PriorUserMessages, NonUserMessages and the
-// conversation-shape counts still describe the body as sent, because that is
-// what the upstream model will see; the semantic cache keys off the body for
-// the same reason. A missing, empty, undecodable or non-UTF-8 header leaves
-// the body-derived extraction untouched, so a client that never sends the
-// header, or sends a bad one, gets today's behaviour.
+// UserContent becomes the header text and the body-derived last user
+// message is demoted instead of dropped, so it stays reachable by the
+// history-aware signals (jailbreak and PII read PriorUserMessages +
+// NonUserMessages): on MemBox's request shape it is a runtime-state block, or
+// on the remote-visitor assistant the retrieved memories and uploaded
+// documents, and it must not vanish from every signal just because it is no
+// longer "current". Unlike the body walker, which demotes a superseded user
+// message to PriorUserMessages, this demotes to NonUserMessages: the block is
+// not the user's words, so it should not enter the reask signal's prior-turn
+// comparison. A body whose last user message already equals the header text
+// is left alone, so the turn is not counted twice in the context text.
+// PriorUserMessages and the conversation-shape counts still describe the body
+// as sent, because that is what the upstream model will see; the semantic
+// cache keys off the body for the same reason. A missing, empty, undecodable or non-UTF-8 header
+// leaves the body-derived extraction untouched, so a client that never sends
+// the header, or sends a bad one, gets today's behaviour.
 func (r *OpenAIRouter) applyCurrentMessageHeader(fast *FastExtractResult, ctx *RequestContext) {
 	if fast == nil || ctx == nil || !r.currentMessageHeaderEnabled() {
 		return
@@ -67,6 +77,9 @@ func (r *OpenAIRouter) applyCurrentMessageHeader(fast *FastExtractResult, ctx *R
 		"body_user_bytes": len(fast.UserContent),
 		"body_user_count": fast.UserMessageCount,
 	})
+	if fast.UserContent != "" && fast.UserContent != text {
+		fast.NonUserMessages = append(fast.NonUserMessages, fast.UserContent)
+	}
 	fast.UserContent = text
 	ctx.CurrentMessageFromHeader = true
 }
