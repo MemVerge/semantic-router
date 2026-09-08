@@ -465,6 +465,20 @@ func GetEmbeddingWithModelType(text string, modelType string, targetDim int) (*E
 	}
 }
 
+// EncodeMmBert32KTextBatch encodes a batch of texts with the mmBERT model. The ONNX runtime has no
+// batched encoder, so this walks the same per-text path GetEmbeddingWithModelType takes.
+func EncodeMmBert32KTextBatch(texts []string, targetDim int) ([][]float32, error) {
+	embeddings := make([][]float32, len(texts))
+	for i, text := range texts {
+		output, err := GetEmbeddingWithModelType(text, "mmbert", targetDim)
+		if err != nil {
+			return nil, err
+		}
+		embeddings[i] = output.Embedding
+	}
+	return embeddings, nil
+}
+
 // ============================================================================
 // Similarity Functions
 // ============================================================================
@@ -560,9 +574,19 @@ func ClassifyMmBert32KIntent(text string) (ClassResult, error) {
 	return classifyWithClassifier("intent", text)
 }
 
+// ClassifyMmBert32KIntentBatch classifies a batch of texts for intent.
+func ClassifyMmBert32KIntentBatch(texts []string) ([]ClassResult, error) {
+	return classifyBatchWithClassifier("intent", texts)
+}
+
 // ClassifyMmBert32KFactcheck classifies text for factcheck
 func ClassifyMmBert32KFactcheck(text string) (ClassResult, error) {
 	return classifyWithClassifier("factcheck", text)
+}
+
+// ClassifyMmBert32KFactcheckBatch classifies a batch of texts for factcheck.
+func ClassifyMmBert32KFactcheckBatch(texts []string) ([]ClassResult, error) {
+	return classifyBatchWithClassifier("factcheck", texts)
 }
 
 // ClassifyMmBert32KJailbreak classifies text for jailbreak detection
@@ -651,6 +675,18 @@ func classifyWithClassifier(name, text string) (ClassResult, error) {
 		Class:      int(result.class_id),
 		Confidence: float32(result.confidence),
 	}, nil
+}
+
+func classifyBatchWithClassifier(name string, texts []string) ([]ClassResult, error) {
+	results := make([]ClassResult, len(texts))
+	for i, text := range texts {
+		result, err := classifyWithClassifier(name, text)
+		if err != nil {
+			return nil, err
+		}
+		results[i] = result
+	}
+	return results, nil
 }
 
 // ============================================================================
@@ -924,6 +960,11 @@ func InitComplexityClassifier(modelPath string, useCPU bool) error {
 // ClassifyComplexityText classifies text for reasoning complexity (ONNX backend).
 func ClassifyComplexityText(text string) (ClassResult, error) {
 	return classifyWithClassifier("complexity", text)
+}
+
+// ClassifyComplexityTextBatch classifies a batch of texts for reasoning complexity (ONNX backend).
+func ClassifyComplexityTextBatch(texts []string) ([]ClassResult, error) {
+	return classifyBatchWithClassifier("complexity", texts)
 }
 
 // ============================================================================
