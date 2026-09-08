@@ -54,7 +54,7 @@ jobs:
   build_pr:
     if: >-
       github.event_name == 'pull_request'
-      && github.repository == 'vllm-project/semantic-router'
+      && github.repository == 'MemVerge/semantic-router'
       && !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 60
