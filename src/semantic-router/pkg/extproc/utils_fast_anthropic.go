@@ -61,6 +61,7 @@ func consumeFastExtractAnthropicSystem(system gjson.Result, result *FastExtractR
 	// entries. Mirror that by counting it as one entry, matching how the
 	// OpenAI fast extractor counts a single role=system message.
 	result.SystemMessageCount++
+	recordFastExtractBodyText(result, text)
 	if text != "" {
 		result.NonUserMessages = append(result.NonUserMessages, text)
 	}
@@ -93,6 +94,10 @@ func consumeFastExtractAnthropicMessage(msg gjson.Result, result *FastExtractRes
 
 	text := extractAnthropicTextFromContent(content)
 	hasToolResult, hasToolUse := scanAnthropicBlockTypes(content)
+	// Anthropic carries tool results inline on user turns; in the OpenAI
+	// shape they are tool-role messages, which AllBodyText counts, so the
+	// body text walks text and tool_result blocks together, in block order.
+	recordFastExtractBodyText(result, extractAnthropicBodyText(content))
 
 	switch role {
 	case "user":
@@ -170,6 +175,33 @@ func extractAnthropicTextFromContent(content gjson.Result) string {
 	if len(parts) == 1 {
 		return parts[0]
 	}
+	return strings.Join(parts, " ")
+}
+
+// extractAnthropicBodyText returns a message's text for AllBodyText: text
+// blocks and the text of tool_result blocks (a string or an array of text
+// blocks), in block order. A plain-string content is returned as is.
+func extractAnthropicBodyText(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if !content.IsArray() {
+		return ""
+	}
+	var parts []string
+	content.ForEach(func(_, block gjson.Result) bool {
+		var t string
+		switch block.Get("type").String() {
+		case "text":
+			t = block.Get("text").String()
+		case "tool_result":
+			t = extractAnthropicTextFromContent(block.Get("content"))
+		}
+		if t != "" {
+			parts = append(parts, t)
+		}
+		return true
+	})
 	return strings.Join(parts, " ")
 }
 

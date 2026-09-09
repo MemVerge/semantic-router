@@ -37,6 +37,24 @@ const (
 	// Example use case: App with Mem0 sends this header to prevent duplicate memory injection.
 	DisableRouterMemory = "x-disable-router-memory"
 
+	// MemBoxCurrentMessage lets a client name the current user turn explicitly.
+	// Value: base64 (standard alphabet, padding optional) of the UTF-8 text of
+	// the turn the user typed. When present and valid it becomes UserContent
+	// for every request signal (decision evaluation, RAG, tool selection,
+	// modality); the body-derived last user message then enters no signal
+	// slice and counts only toward the context token count, which always
+	// reads the whole body. The body itself is forwarded unchanged and the
+	// semantic cache keys off the body. Clients whose last user message is not the typed turn (MemBox
+	// sends the turn, the retrieved memories and a runtime-state block as
+	// separate user messages) send it so routing keys off the user's words,
+	// not the injected context. Honored only when
+	// global.router.current_message_header.enabled is true, because the caller
+	// then chooses the text the security signals evaluate. Stripped before the
+	// request reaches the upstream provider. The value counts against Envoy's
+	// request-header size limit (default 60 KiB), so clients omit it, rather
+	// than truncate it, for very long turns.
+	MemBoxCurrentMessage = "x-membox-current-message"
+
 	// SelectedModel indicates the model that was selected by the router for processing.
 	// This header is set during the routing decision phase.
 	SelectedModel = "x-selected-model"

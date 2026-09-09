@@ -11,6 +11,10 @@ type signalConversationHistory struct {
 	priorUserMessages  []string
 	nonUserMessages    []string
 	hasAssistantReply  bool
+	// allBodyText is every message's text in body order (FastExtractResult
+	// .AllBodyText); empty when the history came from a source that does not
+	// carry it, in which case the context text is rebuilt from the split.
+	allBodyText []string
 
 	// Conversation-shape facts for the conversation signal family.
 	hasDeveloperMessage     bool
@@ -36,6 +40,7 @@ func signalConversationHistoryFromFastExtract(result *FastExtractResult) signalC
 		priorUserMessages:       append([]string(nil), result.PriorUserMessages...),
 		nonUserMessages:         append([]string(nil), result.NonUserMessages...),
 		hasAssistantReply:       result.HasAssistantReply,
+		allBodyText:             append([]string(nil), result.AllBodyText...),
 		hasDeveloperMessage:     result.HasDeveloperMessage,
 		userMessageCount:        result.UserMessageCount,
 		assistantMessageCount:   result.AssistantMessageCount,

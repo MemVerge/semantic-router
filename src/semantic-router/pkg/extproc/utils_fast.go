@@ -20,6 +20,14 @@ type FastExtractResult struct {
 	HasAssistantReply bool
 	FirstImageURL     string
 
+	// AllBodyText is the text content of every message in body order,
+	// whatever its role — the input to the context token count. Like the
+	// slices below it carries message text only (tool-call arguments and
+	// tool_use inputs are not extracted). UserContent / PriorUserMessages /
+	// NonUserMessages are the signal-evaluation split and can be overridden
+	// (x-membox-current-message); this never is.
+	AllBodyText []string
+
 	// Conversation-shape fields for the conversation signal family.
 	HasDeveloperMessage     bool
 	UserMessageCount        int
@@ -103,6 +111,7 @@ func consumeFastExtractMessage(msg gjson.Result, result *FastExtractResult) {
 	result.LastMessageRole = role
 	result.LastMessageToolResult = false
 	result.LastUserAfterToolResult = false
+	recordFastExtractBodyText(result, text)
 
 	switch role {
 	case "user":
@@ -151,6 +160,16 @@ func recordFastExtractUserMessage(result *FastExtractResult, text string, conten
 		result.PriorUserMessages = append(result.PriorUserMessages, result.UserContent)
 	}
 	result.UserContent = text
+}
+
+// recordFastExtractBodyText appends one message's text to AllBodyText,
+// role-blind: tool results count here even though they enter none of the
+// signal-evaluation slices.
+func recordFastExtractBodyText(result *FastExtractResult, text string) {
+	if text == "" {
+		return
+	}
+	result.AllBodyText = append(result.AllBodyText, text)
 }
 
 func recordFastExtractNonUserMessage(result *FastExtractResult, role string, text string) {
