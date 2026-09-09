@@ -88,13 +88,12 @@ func (c *EmbeddingClassifier) ClassifyDetailed(text string) (*EmbeddingClassific
 	}, nil
 }
 
+// ClassifyDetailedBatch scores one shared wave of queries against the text-modality rules.
+// The batched embedding entry point only exists for candle/mmbert, so every other backend
+// falls back to running ClassifyDetailed per row rather than losing the batch path entirely.
 func (c *EmbeddingClassifier) ClassifyDetailedBatch(texts []string) ([]*EmbeddingClassificationResult, error) {
 	if len(c.rules) == 0 {
-		results := make([]*EmbeddingClassificationResult, len(texts))
-		for i := range results {
-			results[i] = &EmbeddingClassificationResult{}
-		}
-		return results, nil
+		return emptyEmbeddingResults(len(texts)), nil
 	}
 	for _, text := range texts {
 		if text == "" {
@@ -104,24 +103,11 @@ func (c *EmbeddingClassifier) ClassifyDetailedBatch(texts []string) ([]*Embeddin
 
 	textRules := c.rulesByModality[config.QueryModalityText]
 	if len(textRules) == 0 {
-		results := make([]*EmbeddingClassificationResult, len(texts))
-		for i := range results {
-			results[i] = &EmbeddingClassificationResult{}
-		}
-		return results, nil
+		return emptyEmbeddingResults(len(texts)), nil
 	}
 
-	modelType := c.getModelType()
-	if c.getBackend() != "candle" || modelType != "mmbert" {
-		results := make([]*EmbeddingClassificationResult, len(texts))
-		for i, text := range texts {
-			result, err := c.ClassifyDetailed(text)
-			if err != nil {
-				return nil, err
-			}
-			results[i] = result
-		}
-		return results, nil
+	if c.getBackend() != "candle" || c.getModelType() != "mmbert" {
+		return c.classifyDetailedSequentially(texts)
 	}
 
 	started := time.Now()
@@ -148,5 +134,29 @@ func (c *EmbeddingClassifier) ClassifyDetailedBatch(texts []string) ([]*Embeddin
 		}
 	}
 	logging.Infof("ClassifyDetailedBatch completed in %v: %d rows (modality=text)", time.Since(started), len(texts))
+	return results, nil
+}
+
+// emptyEmbeddingResults builds one empty result per query, for the cases where there is
+// nothing to score: no rules at all, or no text-modality rules.
+func emptyEmbeddingResults(count int) []*EmbeddingClassificationResult {
+	results := make([]*EmbeddingClassificationResult, count)
+	for i := range results {
+		results[i] = &EmbeddingClassificationResult{}
+	}
+	return results
+}
+
+// classifyDetailedSequentially is the fallback for backends without a batched embedding
+// entry point: each query runs through the scalar path in order.
+func (c *EmbeddingClassifier) classifyDetailedSequentially(texts []string) ([]*EmbeddingClassificationResult, error) {
+	results := make([]*EmbeddingClassificationResult, len(texts))
+	for i, text := range texts {
+		result, err := c.ClassifyDetailed(text)
+		if err != nil {
+			return nil, err
+		}
+		results[i] = result
+	}
 	return results, nil
 }
