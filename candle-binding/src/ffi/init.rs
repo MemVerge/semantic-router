@@ -138,7 +138,11 @@ fn check_for_lora_weights(weights_path: &Path) -> Result<bool, Box<dyn std::erro
     // Read a portion of the safetensors file to check for LoRA weight names
     let mut file = File::open(weights_path)?;
     let mut buffer = vec![0u8; BUFFER_SIZE];
-    file.read(&mut buffer)?;
+    // `read` is free to return fewer bytes than asked for, and does for any file shorter than
+    // BUFFER_SIZE. Trim to what actually arrived so the pattern scan below never reads the
+    // zero padding this buffer was created with.
+    let read = file.read(&mut buffer)?;
+    buffer.truncate(read);
 
     // Convert to string and check for LoRA weight patterns
     let content = String::from_utf8_lossy(&buffer);
