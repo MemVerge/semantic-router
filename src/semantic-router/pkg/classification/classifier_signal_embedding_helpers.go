@@ -83,10 +83,25 @@ func (c *Classifier) evaluateEmbeddingSignal(results *SignalResults, mu *sync.Mu
 	results.Metrics.Embedding.Confidence = bestConfidence
 }
 
+// evaluateEmbeddingSignalsBatch mirrors evaluateEmbeddingSignal for a whole wave: one shared
+// text-modality batch for every row that carries text, then a per-row image pass and the same
+// two-modality bookkeeping the scalar path performs.
 func (c *Classifier) evaluateEmbeddingSignalsBatch(rows []*signalEvaluationRow) {
-	textResults := make([]*EmbeddingClassificationResult, len(rows))
-	textErrors := make([]error, len(rows))
-	textElapsedByRow := make([]time.Duration, len(rows))
+	textResults, textErrors, textElapsedByRow := c.classifyEmbeddingTextBatch(rows)
+	for i, row := range rows {
+		c.recordEmbeddingSignalRow(row, textResults[i], textErrors[i], textElapsedByRow[i])
+	}
+}
+
+// classifyEmbeddingTextBatch runs one text-modality batch over the rows that carry text and
+// fans the aligned per-row result - or the shared failure - back out by row index. Rows with
+// no text keep a nil result and a zero elapsed, matching the scalar path's decision to skip
+// classification rather than report an empty-query error.
+func (c *Classifier) classifyEmbeddingTextBatch(rows []*signalEvaluationRow) ([]*EmbeddingClassificationResult, []error, []time.Duration) {
+	results := make([]*EmbeddingClassificationResult, len(rows))
+	errs := make([]error, len(rows))
+	elapsedByRow := make([]time.Duration, len(rows))
+
 	textRows := make([]int, 0, len(rows))
 	texts := make([]string, 0, len(rows))
 	for i, row := range rows {
@@ -97,66 +112,66 @@ func (c *Classifier) evaluateEmbeddingSignalsBatch(rows []*signalEvaluationRow) 
 		textRows = append(textRows, i)
 		texts = append(texts, text)
 	}
+	if len(texts) == 0 {
+		return results, errs, elapsedByRow
+	}
 
-	var textElapsed time.Duration
-	if len(texts) > 0 {
-		started := time.Now()
-		batchResults, err := c.keywordEmbeddingClassifier.ClassifyDetailedBatch(texts)
-		textElapsed = time.Since(started)
-		if err == nil && len(batchResults) != len(texts) {
-			err = fmt.Errorf("embedding classifier batch returned %d results for %d inputs", len(batchResults), len(texts))
-		}
+	started := time.Now()
+	batchResults, err := c.keywordEmbeddingClassifier.ClassifyDetailedBatch(texts)
+	elapsed := time.Since(started)
+	if err == nil && len(batchResults) != len(texts) {
+		err = fmt.Errorf("embedding classifier batch returned %d results for %d inputs", len(batchResults), len(texts))
+	}
+	for i, row := range textRows {
+		elapsedByRow[row] = elapsed
 		if err != nil {
-			for _, row := range textRows {
-				textErrors[row] = err
-				textElapsedByRow[row] = textElapsed
-			}
-		} else {
-			for i, row := range textRows {
-				textResults[row] = batchResults[i]
-				textElapsedByRow[row] = textElapsed
-			}
+			errs[row] = err
+			continue
 		}
+		results[row] = batchResults[i]
 	}
+	return results, errs, elapsedByRow
+}
 
-	for i, row := range rows {
-		var (
-			imageResult  *EmbeddingClassificationResult
-			imageErr     error
-			imageElapsed time.Duration
+// recordEmbeddingSignalRow completes one row: it runs the row's image-modality pass, then
+// folds both modalities into the row's SignalResults. Text and image are independent, so a
+// text-batch failure still lets a valid image-rule match land.
+func (c *Classifier) recordEmbeddingSignalRow(row *signalEvaluationRow, textResult *EmbeddingClassificationResult, textErr error, textElapsed time.Duration) {
+	var (
+		imageResult  *EmbeddingClassificationResult
+		imageErr     error
+		imageElapsed time.Duration
+	)
+	if strings.TrimSpace(row.input.imageURL) != "" {
+		started := time.Now()
+		imageResult, imageErr = c.keywordEmbeddingClassifier.classifyDetailedMultimodalWithCache(
+			config.QueryModalityImage,
+			row.input.imageURL,
+			row.imgCache,
 		)
-		if strings.TrimSpace(row.input.imageURL) != "" {
-			started := time.Now()
-			imageResult, imageErr = c.keywordEmbeddingClassifier.classifyDetailedMultimodalWithCache(
-				config.QueryModalityImage,
-				row.input.imageURL,
-				row.imgCache,
-			)
-			imageElapsed = time.Since(started)
-		}
-
-		rowTextElapsed := textElapsedByRow[i]
-		row.results.Metrics.Embedding.ExecutionTimeMs = float64((rowTextElapsed + imageElapsed).Microseconds()) / 1000.0
-		logging.Debugf("[Signal Computation] Embedding signal evaluation completed in %v (text=%v image=%v)",
-			rowTextElapsed+imageElapsed, rowTextElapsed, imageElapsed)
-		if textErrors[i] != nil {
-			logging.Errorf("text-modality embedding rule evaluation failed: %v", textErrors[i])
-		}
-		if imageErr != nil {
-			logging.Errorf("image-modality embedding rule evaluation failed: %v", imageErr)
-		}
-
-		row.mu.Lock()
-		bestConfidence := 0.0
-		if textResults[i] != nil {
-			bestConfidence = recordEmbeddingResult(row.results, textResults[i], rowTextElapsed, bestConfidence)
-		}
-		if imageResult != nil {
-			bestConfidence = recordEmbeddingResult(row.results, imageResult, imageElapsed, bestConfidence)
-		}
-		row.results.Metrics.Embedding.Confidence = bestConfidence
-		row.mu.Unlock()
+		imageElapsed = time.Since(started)
 	}
+
+	row.results.Metrics.Embedding.ExecutionTimeMs = float64((textElapsed + imageElapsed).Microseconds()) / 1000.0
+	logging.Debugf("[Signal Computation] Embedding signal evaluation completed in %v (text=%v image=%v)",
+		textElapsed+imageElapsed, textElapsed, imageElapsed)
+	if textErr != nil {
+		logging.Errorf("text-modality embedding rule evaluation failed: %v", textErr)
+	}
+	if imageErr != nil {
+		logging.Errorf("image-modality embedding rule evaluation failed: %v", imageErr)
+	}
+
+	row.mu.Lock()
+	defer row.mu.Unlock()
+	bestConfidence := 0.0
+	if textResult != nil {
+		bestConfidence = recordEmbeddingResult(row.results, textResult, textElapsed, bestConfidence)
+	}
+	if imageResult != nil {
+		bestConfidence = recordEmbeddingResult(row.results, imageResult, imageElapsed, bestConfidence)
+	}
+	row.results.Metrics.Embedding.Confidence = bestConfidence
 }
 
 // recordEmbeddingResult merges scores and matches from a single classification
