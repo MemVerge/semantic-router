@@ -12,9 +12,6 @@ on:
       - 'src/semantic-router/pkg/config/**'
       - '.github/workflows/operator-ci.yml'
   pull_request:
-    branches:
-      - main
-      - develop
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

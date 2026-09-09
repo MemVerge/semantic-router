@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch: # Allow manual triggering
 
 concurrency:
@@ -18,7 +17,7 @@ jobs:
   docs-precommit:
     needs: changes
     if: >-
-      github.repository == 'vllm-project/semantic-router'
+      github.repository == 'MemVerge/semantic-router'
       && needs.changes.outputs.docs_only == 'true'
       && github.event_name != 'workflow_dispatch'
       && (github.event_name != 'pull_request'
@@ -73,7 +72,7 @@ jobs:
   full-precommit:
     needs: changes
     if: >-
-      github.repository == 'vllm-project/semantic-router'
+      github.repository == 'MemVerge/semantic-router'
       && (needs.changes.outputs.docs_only != 'true'
           || github.event_name == 'workflow_dispatch'
           || (github.event_name == 'pull_request'
