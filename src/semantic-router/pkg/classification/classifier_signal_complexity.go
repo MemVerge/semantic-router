@@ -38,13 +38,34 @@ func (c *Classifier) evaluateComplexitySignal(results *SignalResults, mu *sync.M
 	logging.Debugf("[Signal Computation] Complexity signal evaluation completed in %v", elapsed)
 }
 
+// evaluateComplexitySignalsBatch runs the wave's complexity rules once per mode: the
+// embedding-mode rules row by row, the model-mode rules through a single shared inference
+// when the backend offers one. Both passes fold into the same per-row confidence and elapsed
+// accumulators, so the metrics a row records stay identical to the scalar path.
 func (c *Classifier) evaluateComplexitySignalsBatch(rows []*signalEvaluationRow) {
 	bestConfidences := make([]float64, len(rows))
 	elapsedByRow := make([]time.Duration, len(rows))
+
+	c.evaluateEmbeddingComplexityRulesBatch(rows, bestConfidences, elapsedByRow)
+	c.evaluateModelComplexityRulesBatch(rows, bestConfidences, elapsedByRow)
+
 	for i, row := range rows {
-		if c.complexityClassifier == nil {
-			continue
-		}
+		row.results.Metrics.Complexity.ExecutionTimeMs = float64(elapsedByRow[i].Microseconds()) / 1000.0
+		row.mu.Lock()
+		row.results.Metrics.Complexity.Confidence = bestConfidences[i]
+		row.mu.Unlock()
+		logging.Debugf("[Signal Computation] Complexity signal evaluation completed in %v", elapsedByRow[i])
+	}
+}
+
+// evaluateEmbeddingComplexityRulesBatch scores the embedding-mode rules for every row. The
+// prototype-bank classifier has no batched entry point, so this stays a per-row loop; only
+// the shared image-embedding cache deduplicates work across the wave.
+func (c *Classifier) evaluateEmbeddingComplexityRulesBatch(rows []*signalEvaluationRow, bestConfidences []float64, elapsedByRow []time.Duration) {
+	if c.complexityClassifier == nil {
+		return
+	}
+	for i, row := range rows {
 		started := time.Now()
 		bestConfidences[i] = c.evaluateEmbeddingComplexityRules(
 			row.results,
@@ -56,51 +77,68 @@ func (c *Classifier) evaluateComplexitySignalsBatch(rows []*signalEvaluationRow)
 		)
 		elapsedByRow[i] += time.Since(started)
 	}
+}
 
+// evaluateModelComplexityRulesBatch sends the model-mode rules through the batched entry
+// point when the configured inference backend exposes one, and falls back to the per-row
+// classifier otherwise.
+func (c *Classifier) evaluateModelComplexityRulesBatch(rows []*signalEvaluationRow, bestConfidences []float64, elapsedByRow []time.Duration) {
 	modelRules := c.modelComplexityRules()
-	if len(modelRules) > 0 && c.complexityModelInference != nil && c.ComplexityMapping != nil {
-		if batchInference, ok := c.complexityModelInference.(ComplexityBatchInference); ok {
-			texts := make([]string, len(rows))
-			for i, row := range rows {
-				texts[i] = row.textForSignal(config.SignalTypeComplexity)
-			}
-			started := time.Now()
-			classResults, err := batchInference.ClassifyBatch(texts)
-			batchElapsed := time.Since(started)
-			if err == nil && len(classResults) != len(rows) {
-				err = fmt.Errorf("complexity model batch returned %d results for %d inputs", len(classResults), len(rows))
-			}
-			if err != nil {
-				logging.Errorf("complexity model batch classification failed: %v", err)
-			} else {
-				for i, row := range rows {
-					confidence := c.recordModelComplexityResult(row.results, &row.mu, modelRules, classResults[i], batchElapsed)
-					if confidence > bestConfidences[i] {
-						bestConfidences[i] = confidence
-					}
-				}
-			}
-			for i := range rows {
-				elapsedByRow[i] += batchElapsed
-			}
-		} else {
-			for i, row := range rows {
-				started := time.Now()
-				confidence := c.evaluateModelComplexityRules(row.results, &row.mu, row.textForSignal(config.SignalTypeComplexity), started)
-				elapsedByRow[i] += time.Since(started)
-				if confidence > bestConfidences[i] {
-					bestConfidences[i] = confidence
-				}
-			}
-		}
+	if len(modelRules) == 0 || c.complexityModelInference == nil || c.ComplexityMapping == nil {
+		return
+	}
+	batchInference, ok := c.complexityModelInference.(ComplexityBatchInference)
+	if !ok {
+		c.evaluateModelComplexityRulesPerRow(rows, bestConfidences, elapsedByRow)
+		return
+	}
+	c.classifyModelComplexityBatch(batchInference, modelRules, rows, bestConfidences, elapsedByRow)
+}
+
+// classifyModelComplexityBatch runs one shared inference and fans the aligned results back
+// out by row. A batch failure - including a result count that does not match the wave - is
+// not retried per row: the whole model pass is dropped so no row is charged twice for the
+// same inference.
+func (c *Classifier) classifyModelComplexityBatch(batchInference ComplexityBatchInference, modelRules []config.ComplexityRule, rows []*signalEvaluationRow, bestConfidences []float64, elapsedByRow []time.Duration) {
+	texts := make([]string, len(rows))
+	for i, row := range rows {
+		texts[i] = row.textForSignal(config.SignalTypeComplexity)
 	}
 
+	started := time.Now()
+	classResults, err := batchInference.ClassifyBatch(texts)
+	batchElapsed := time.Since(started)
+	// Every row waited on the shared inference, so every row is charged for it whether or
+	// not the batch produced a usable verdict.
+	for i := range rows {
+		elapsedByRow[i] += batchElapsed
+	}
+
+	if err == nil && len(classResults) != len(rows) {
+		err = fmt.Errorf("complexity model batch returned %d results for %d inputs", len(classResults), len(rows))
+	}
+	if err != nil {
+		logging.Errorf("complexity model batch classification failed: %v", err)
+		return
+	}
 	for i, row := range rows {
-		row.results.Metrics.Complexity.ExecutionTimeMs = float64(elapsedByRow[i].Microseconds()) / 1000.0
-		row.mu.Lock()
-		row.results.Metrics.Complexity.Confidence = bestConfidences[i]
-		row.mu.Unlock()
-		logging.Debugf("[Signal Computation] Complexity signal evaluation completed in %v", elapsedByRow[i])
+		confidence := c.recordModelComplexityResult(row.results, &row.mu, modelRules, classResults[i], batchElapsed)
+		if confidence > bestConfidences[i] {
+			bestConfidences[i] = confidence
+		}
+	}
+}
+
+// evaluateModelComplexityRulesPerRow is the fallback for inference backends without a
+// batched entry point: every row runs its own classification.
+func (c *Classifier) evaluateModelComplexityRulesPerRow(rows []*signalEvaluationRow, bestConfidences []float64, elapsedByRow []time.Duration) {
+	for i, row := range rows {
+		started := time.Now()
+		confidence := c.evaluateModelComplexityRules(row.results, &row.mu, row.textForSignal(config.SignalTypeComplexity), started)
+		elapsedByRow[i] += time.Since(started)
+		if confidence > bestConfidences[i] {
+			bestConfidences[i] = confidence
+		}
 	}
 }
 
