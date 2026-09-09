@@ -3,6 +3,7 @@ package extproc
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -109,17 +110,18 @@ func TestApplyCurrentMessageHeader_DisabledByDefaultIgnoresHeader(t *testing.T) 
 }
 
 // The body walker lands UserContent on the LAST user message; the header
-// replaces it and demotes the displaced block to NonUserMessages so the
-// history-aware signals (jailbreak, PII) still see it. Everything else keeps
-// describing the body as sent.
-func TestApplyCurrentMessageHeader_ReplacesUserContentAndDemotesDisplacedBlock(t *testing.T) {
+// replaces it and touches nothing else. The context text is the whole body
+// as sent (AllBodyText), so the displaced block still counts toward
+// long_context without being demoted anywhere.
+func TestApplyCurrentMessageHeader_ReplacesUserContentOnly(t *testing.T) {
 	cases := map[string]struct {
 		body      string
 		displaced string
+		priorTurn string
 	}{
-		"membox local chat: runtime block is last":    {memboxLocalChatBody, memboxRuntimeBlock},
-		"membox remote chat: memories are last":       {memboxRemoteChatBody, memboxMemoryBlock},
-		"single wrapped message: the wrapper is last": {memoryAugmentedBody, "<memories>trip to Kyoto in March; budget 2k</memories>\n\nwhere should I stay?"},
+		"membox local chat: runtime block is last":    {memboxLocalChatBody, memboxRuntimeBlock, "What did I plan last week?"},
+		"membox remote chat: memories are last":       {memboxRemoteChatBody, memboxMemoryBlock, ""},
+		"single wrapped message: the wrapper is last": {memoryAugmentedBody, "<memories>trip to Kyoto in March; budget 2k</memories>\n\nwhere should I stay?", "What did I plan last week?"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -133,44 +135,79 @@ func TestApplyCurrentMessageHeader_ReplacesUserContentAndDemotesDisplacedBlock(t
 
 			assert.True(t, ctx.CurrentMessageFromHeader)
 			assert.Equal(t, "where should I stay?", fast.UserContent)
-			assert.Equal(t, append(append([]string(nil), before.NonUserMessages...), tc.displaced), fast.NonUserMessages,
-				"the displaced block is demoted to the non-user history, not dropped")
+			assert.Equal(t, before.NonUserMessages, fast.NonUserMessages, "nothing is demoted")
 			assert.Equal(t, before.PriorUserMessages, fast.PriorUserMessages, "prior turns describe the body as sent")
+			assert.Equal(t, before.AllBodyText, fast.AllBodyText, "the body text is never overridden")
 			assert.Equal(t, before.UserMessageCount, fast.UserMessageCount)
 			assert.Equal(t, before.AssistantMessageCount, fast.AssistantMessageCount)
 			assert.Equal(t, before.LastMessageRole, fast.LastMessageRole)
 
-			history := signalConversationHistoryFromFastExtract(fast)
-			assert.Contains(t, history.nonUserMessages, tc.displaced, "the displaced block reaches the history-aware signals")
-			assert.NotContains(t, history.priorUserMessages, tc.displaced, "but not the reask signal's prior-turn comparison")
-
-			// The accepted side effect: the context text (and so the token
-			// count) keeps the displaced block, as it did before the header.
-			input := newRouterWithCurrentMessageHeader(true).prepareSignalEvaluationInput(history)
+			input := newRouterWithCurrentMessageHeader(true).prepareSignalEvaluationInput(signalConversationHistoryFromFastExtract(fast))
 			assert.Equal(t, "where should I stay?", input.evaluationText, "the classifiers score the header text only")
-			assert.Contains(t, input.allMessagesText, tc.displaced)
-			assert.Contains(t, input.allMessagesText, "where should I stay?")
+			assert.Equal(t, "where should I stay?", input.currentUserText)
+			assert.Contains(t, input.allMessagesText, tc.displaced, "the displaced block still counts as context")
+			if tc.priorTurn != "" {
+				assert.Contains(t, input.allMessagesText, tc.priorTurn, "prior user turns count as context")
+			}
 		})
 	}
 }
 
-// A body whose last user message already IS the typed turn (a client that
-// sends both) must not have the turn counted twice in the context text.
-func TestApplyCurrentMessageHeader_EqualBodyTurnIsNotDemoted(t *testing.T) {
-	body := memboxChatBody(
-		[2]string{"system", "You are a helpful assistant."},
-		[2]string{"user", "where should I stay?"},
-	)
-	fast, err := extractContentFast([]byte(body))
+// AllBodyText is the context-count input: one entry per message with text,
+// in body order, every role — on both inbound protocols, so a tool result
+// counts the same whether it arrives as a tool-role message (OpenAI) or an
+// inline tool_result block (Anthropic).
+func TestExtractContentFast_AllBodyTextCountsEveryMessageOnBothProtocols(t *testing.T) {
+	openAIBody := []byte(`{
+		"model": "auto",
+		"messages": [
+			{"role": "system", "content": "system prompt"},
+			{"role": "user", "content": "first question"},
+			{"role": "assistant", "content": "calling a tool", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
+			{"role": "tool", "tool_call_id": "c1", "content": "tool output"},
+			{"role": "user", "content": [{"type": "text", "text": "second question"}]}
+		]
+	}`)
+	fast, err := extractContentFast(openAIBody)
 	require.NoError(t, err)
-	before := *fast
+	assert.Equal(t, []string{"system prompt", "first question", "calling a tool", "tool output", "second question"}, fast.AllBodyText)
+	assert.Equal(t, "second question", fast.UserContent)
+	assert.Equal(t, []string{"first question"}, fast.PriorUserMessages)
+	assert.Equal(t, []string{"system prompt", "calling a tool"}, fast.NonUserMessages, "tool output enters no signal slice")
 
-	ctx := ctxWithHeaders(map[string]string{headers.MemBoxCurrentMessage: b64("where should I stay?")})
-	newRouterWithCurrentMessageHeader(true).applyCurrentMessageHeader(fast, ctx)
+	anthropicBody := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 64,
+		"system": [{"type": "text", "text": "system prompt"}],
+		"messages": [
+			{"role": "user", "content": "first question"},
+			{"role": "assistant", "content": [{"type": "text", "text": "calling a tool"}, {"type": "tool_use", "id": "tu_1", "name": "lookup", "input": {}}]},
+			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "tool output"}, {"type": "text", "text": "second question"}]}
+		]
+	}`)
+	fast, err = extractContentFastAnthropic(anthropicBody)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"system prompt", "first question", "calling a tool", "tool output second question"}, fast.AllBodyText)
+	assert.Equal(t, "second question", fast.UserContent)
+}
 
-	assert.True(t, ctx.CurrentMessageFromHeader)
-	assert.Equal(t, "where should I stay?", fast.UserContent)
-	assert.Equal(t, before.NonUserMessages, fast.NonUserMessages, "nothing to demote")
+// The whole-body context count is not behind the header gate: with the gate
+// off and no header, evaluation stays on the body's last user message (today's
+// routing) while the context text now includes prior user turns, which the
+// nonUser+current join used to leave out.
+func TestPrepareSignalEvaluationInput_ContextTextIsTheWholeBodyWithoutTheHeader(t *testing.T) {
+	fast, err := extractContentFast([]byte(memboxLocalChatBody))
+	require.NoError(t, err)
+	ctx := ctxWithHeaders(map[string]string{})
+	newRouterWithCurrentMessageHeader(false).applyCurrentMessageHeader(fast, ctx)
+	assert.False(t, ctx.CurrentMessageFromHeader)
+
+	input := newRouterWithCurrentMessageHeader(false).prepareSignalEvaluationInput(signalConversationHistoryFromFastExtract(fast))
+	assert.Equal(t, memboxRuntimeBlock, input.evaluationText, "gate off: the body's last user message is still what gets scored")
+	assert.Equal(t, strings.Join(fast.AllBodyText, " "), input.allMessagesText)
+	assert.Contains(t, input.allMessagesText, "What did I plan last week?", "prior user turns now count")
+	assert.Contains(t, input.allMessagesText, memboxTypedTurn)
+	assert.Contains(t, input.allMessagesText, memboxMemoryBlock)
 }
 
 func TestApplyCurrentMessageHeader_AbsentKeepsBodyExtraction(t *testing.T) {
@@ -228,7 +265,7 @@ func TestExtractFastRequestState_HeaderOverridesBothProtocols(t *testing.T) {
 		memboxTypedTurn,
 		memboxMemoryBlock,
 	}, fast.PriorUserMessages, "the body's user messages, as sent")
-	assert.Equal(t, []string{"You are a helpful assistant.", "You planned a trip.", memboxRuntimeBlock}, fast.NonUserMessages)
+	assert.Equal(t, []string{"You are a helpful assistant.", "You planned a trip."}, fast.NonUserMessages, "the displaced block is not demoted")
 
 	anthropicBody := []byte(`{
 		"model": "claude-sonnet-4-5",

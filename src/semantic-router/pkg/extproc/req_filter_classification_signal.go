@@ -50,7 +50,16 @@ func (r *OpenAIRouter) prepareSignalEvaluationInput(history signalConversationHi
 		input.compressedText = input.evaluationText
 	}
 
-	if history.currentUserMessage != "" && len(history.nonUserMessages) > 0 {
+	// The context text (token count, long_context) is the whole body as sent
+	// — every role, including prior user turns and tool results — because
+	// that is what the upstream model reads. The evaluation text above is the
+	// current turn only, which x-membox-current-message may have named.
+	// Every production history comes from the fast extract and carries
+	// allBodyText; the join below it is kept for histories built without it
+	// (consumeSignalConversationMessage, and literals in tests).
+	if len(history.allBodyText) > 0 {
+		input.allMessagesText = strings.Join(history.allBodyText, " ")
+	} else if history.currentUserMessage != "" && len(history.nonUserMessages) > 0 {
 		allMessages := make([]string, 0, len(history.nonUserMessages)+1)
 		allMessages = append(allMessages, history.nonUserMessages...)
 		allMessages = append(allMessages, history.currentUserMessage)

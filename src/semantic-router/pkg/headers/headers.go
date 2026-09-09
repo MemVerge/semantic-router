@@ -41,10 +41,10 @@ const (
 	// Value: base64 (standard alphabet, padding optional) of the UTF-8 text of
 	// the turn the user typed. When present and valid it becomes UserContent
 	// for every request signal (decision evaluation, RAG, tool selection,
-	// modality) and the body-derived last user message is demoted to the
-	// non-user history, where the history-aware signals still read it; the
-	// body itself is forwarded unchanged and the semantic cache keys off the
-	// body. Clients whose last user message is not the typed turn (MemBox
+	// modality); the body-derived last user message then enters no signal
+	// slice and counts only toward the context token count, which always
+	// reads the whole body. The body itself is forwarded unchanged and the
+	// semantic cache keys off the body. Clients whose last user message is not the typed turn (MemBox
 	// sends the turn, the retrieved memories and a runtime-state block as
 	// separate user messages) send it so routing keys off the user's words,
 	// not the injected context. Honored only when
