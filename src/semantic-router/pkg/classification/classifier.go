@@ -63,6 +63,8 @@ type Classifier struct {
 	// Knowledge-base classifiers keyed by configured KB name.
 	kbClassifiers map[string]*KnowledgeBaseClassifier
 
+	signalBatchCollector *signalBatchCollector
+
 	// Identity header names resolved from authz.identity config (or defaults).
 	// Used by EvaluateAllSignalsWithHeaders to read user identity from requests.
 	authzUserIDHeader     string
@@ -177,8 +179,15 @@ func newClassifierWithOptions(cfg *config.RouterConfig, options ...option) (*Cla
 	if cfg == nil {
 		return nil, fmt.Errorf("config is nil")
 	}
+	batchConfig := cfg.API.BatchClassification
+	if batchConfig.SignalBatchingEnabled && batchConfig.MaxConcurrency > 0 && batchConfig.MaxConcurrency < signalBatchMaxSize {
+		return nil, fmt.Errorf("signal batching requires max_concurrency to be zero or at least %d", signalBatchMaxSize)
+	}
 
 	classifier := &Classifier{Config: cfg}
+	if batchConfig.SignalBatchingEnabled {
+		classifier.signalBatchCollector = newSignalBatchCollector(classifier.evaluateSignalBatch)
+	}
 
 	// Resolve identity header names from authz.identity config (or defaults).
 	classifier.authzUserIDHeader = cfg.Authz.Identity.GetUserIDHeader()

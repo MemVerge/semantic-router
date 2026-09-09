@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	candle_binding "github.com/vllm-project/semantic-router/candle-binding"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"
@@ -35,6 +36,72 @@ func (c *Classifier) evaluateComplexitySignal(results *SignalResults, mu *sync.M
 	results.Metrics.Complexity.Confidence = bestConfidence
 	mu.Unlock()
 	logging.Debugf("[Signal Computation] Complexity signal evaluation completed in %v", elapsed)
+}
+
+func (c *Classifier) evaluateComplexitySignalsBatch(rows []*signalEvaluationRow) {
+	bestConfidences := make([]float64, len(rows))
+	elapsedByRow := make([]time.Duration, len(rows))
+	for i, row := range rows {
+		if c.complexityClassifier == nil {
+			continue
+		}
+		started := time.Now()
+		bestConfidences[i] = c.evaluateEmbeddingComplexityRules(
+			row.results,
+			&row.mu,
+			row.textForSignal(config.SignalTypeComplexity),
+			row.input.imageURL,
+			row.imgCache,
+			started,
+		)
+		elapsedByRow[i] += time.Since(started)
+	}
+
+	modelRules := c.modelComplexityRules()
+	if len(modelRules) > 0 && c.complexityModelInference != nil && c.ComplexityMapping != nil {
+		if batchInference, ok := c.complexityModelInference.(ComplexityBatchInference); ok {
+			texts := make([]string, len(rows))
+			for i, row := range rows {
+				texts[i] = row.textForSignal(config.SignalTypeComplexity)
+			}
+			started := time.Now()
+			classResults, err := batchInference.ClassifyBatch(texts)
+			batchElapsed := time.Since(started)
+			if err == nil && len(classResults) != len(rows) {
+				err = fmt.Errorf("complexity model batch returned %d results for %d inputs", len(classResults), len(rows))
+			}
+			if err != nil {
+				logging.Errorf("complexity model batch classification failed: %v", err)
+			} else {
+				for i, row := range rows {
+					confidence := c.recordModelComplexityResult(row.results, &row.mu, modelRules, classResults[i], batchElapsed)
+					if confidence > bestConfidences[i] {
+						bestConfidences[i] = confidence
+					}
+				}
+			}
+			for i := range rows {
+				elapsedByRow[i] += batchElapsed
+			}
+		} else {
+			for i, row := range rows {
+				started := time.Now()
+				confidence := c.evaluateModelComplexityRules(row.results, &row.mu, row.textForSignal(config.SignalTypeComplexity), started)
+				elapsedByRow[i] += time.Since(started)
+				if confidence > bestConfidences[i] {
+					bestConfidences[i] = confidence
+				}
+			}
+		}
+	}
+
+	for i, row := range rows {
+		row.results.Metrics.Complexity.ExecutionTimeMs = float64(elapsedByRow[i].Microseconds()) / 1000.0
+		row.mu.Lock()
+		row.results.Metrics.Complexity.Confidence = bestConfidences[i]
+		row.mu.Unlock()
+		logging.Debugf("[Signal Computation] Complexity signal evaluation completed in %v", elapsedByRow[i])
+	}
 }
 
 // evaluateEmbeddingComplexityRules runs the prototype-bank similarity classifier over the
@@ -77,12 +144,7 @@ func (c *Classifier) evaluateEmbeddingComplexityRules(results *SignalResults, mu
 // rule reports the neutral "medium" band (matching the embedding path's neutral semantics).
 // It returns the highest match confidence observed.
 func (c *Classifier) evaluateModelComplexityRules(results *SignalResults, mu *sync.Mutex, text string, start time.Time) float64 {
-	modelRules := make([]config.ComplexityRule, 0, len(c.Config.ComplexityRules))
-	for _, rule := range c.Config.ComplexityRules {
-		if rule.UsesModel() {
-			modelRules = append(modelRules, rule)
-		}
-	}
+	modelRules := c.modelComplexityRules()
 	if len(modelRules) == 0 {
 		return 0
 	}
@@ -92,13 +154,27 @@ func (c *Classifier) evaluateModelComplexityRules(results *SignalResults, mu *sy
 		logging.Errorf("complexity model classification failed: %v", err)
 		return 0
 	}
+	return c.recordModelComplexityResult(results, mu, modelRules, classResult, time.Since(start))
+}
+
+func (c *Classifier) modelComplexityRules() []config.ComplexityRule {
+	modelRules := make([]config.ComplexityRule, 0, len(c.Config.ComplexityRules))
+	for _, rule := range c.Config.ComplexityRules {
+		if rule.UsesModel() {
+			modelRules = append(modelRules, rule)
+		}
+	}
+	return modelRules
+}
+
+func (c *Classifier) recordModelComplexityResult(results *SignalResults, mu *sync.Mutex, modelRules []config.ComplexityRule, classResult candle_binding.ClassResult, elapsed time.Duration) float64 {
 	difficulty, ok := c.ComplexityMapping.GetDifficultyFromIndex(classResult.Class)
 	if !ok {
 		logging.Errorf("complexity model returned unmapped class index %d", classResult.Class)
 		return 0
 	}
 	confidence := float64(classResult.Confidence)
-	latencySeconds := time.Since(start).Seconds()
+	latencySeconds := elapsed.Seconds()
 
 	bestConfidence := 0.0
 	mu.Lock()

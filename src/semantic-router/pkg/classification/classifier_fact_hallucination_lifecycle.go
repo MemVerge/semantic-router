@@ -111,6 +111,18 @@ func (c *Classifier) ClassifyFactCheck(text string) (*FactCheckResult, error) {
 	return result, nil
 }
 
+func (c *Classifier) ClassifyFactCheckBatch(texts []string) ([]*FactCheckResult, error) {
+	if c.factCheckClassifier == nil || !c.factCheckClassifier.IsInitialized() {
+		return nil, fmt.Errorf("fact-check classifier is not initialized")
+	}
+
+	results, err := c.factCheckClassifier.ClassifyBatch(texts)
+	if err != nil {
+		return nil, fmt.Errorf("fact-check batch classification failed: %w", err)
+	}
+	return results, nil
+}
+
 // DetectHallucination checks if an answer contains hallucinations given the context.
 func (c *Classifier) DetectHallucination(context, question, answer string) (*HallucinationResult, error) {
 	if c.hallucinationDetector == nil || !c.hallucinationDetector.IsInitialized() {

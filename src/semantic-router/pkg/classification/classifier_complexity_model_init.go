@@ -18,6 +18,10 @@ type ComplexityInference interface {
 	Classify(text string) (candle_binding.ClassResult, error)
 }
 
+type ComplexityBatchInference interface {
+	ClassifyBatch(texts []string) ([]candle_binding.ClassResult, error)
+}
+
 // ComplexityInitializerImpl initializes the Candle ModernBERT complexity classifier.
 type ComplexityInitializerImpl struct{}
 
@@ -42,6 +46,10 @@ type ComplexityInferenceImpl struct{}
 
 func (c *ComplexityInferenceImpl) Classify(text string) (candle_binding.ClassResult, error) {
 	return candle_binding.ClassifyComplexityText(text)
+}
+
+func (c *ComplexityInferenceImpl) ClassifyBatch(texts []string) ([]candle_binding.ClassResult, error) {
+	return candle_binding.ClassifyComplexityTextBatch(texts)
 }
 
 // createComplexityInference creates the Candle complexity inference.

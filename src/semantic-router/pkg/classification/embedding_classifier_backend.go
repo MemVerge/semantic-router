@@ -17,6 +17,8 @@ import (
 // It exists so tests can override it.
 var getEmbeddingWithModelType = candle_binding.GetEmbeddingWithModelType
 
+var encodeMmBert32KTextBatch = candle_binding.EncodeMmBert32KTextBatch
+
 // getMultiModalTextEmbedding computes a text embedding via the multimodal model.
 // Package-level var so tests can override it.
 var getMultiModalTextEmbedding = func(text string, targetDim int) ([]float32, error) {
