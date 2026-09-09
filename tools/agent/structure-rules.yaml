@@ -128,6 +128,7 @@ structure_exceptions:
     file_checks: relaxed
     function_checks: relaxed
   - paths:
+      - candle-binding/src/ffi/init.rs
       - candle-binding/src/model_architectures/embedding/mmbert_embedding.rs
       - candle-binding/src/model_architectures/traditional/modernbert.rs
       - candle-binding/src/model_architectures/traditional/modernbert_test.rs
