@@ -209,7 +209,19 @@ RUN if [ "$TARGETARCH" != "amd64" ]; then \
       echo "ROCm vllm-sr image only supports TARGETARCH=amd64, got: $TARGETARCH" && exit 1; \
     fi
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Debian bullseye went EOL on 2026-08-31. deb.debian.org now 404s every .deb in
+# the bullseye-security pool and serves an expired Release file for it, so a
+# plain `apt-get update` exits 100 here and takes the build down with it. The
+# release's final package set -- openssl 1.1.1w included -- lives on
+# archive.debian.org, whose Release files are expired by design and so need
+# Check-Valid-Until disabled. bullseye is pinned deliberately, so that what is
+# built here links against glibc 2.31 and still loads on the Ubuntu 22.04
+# runtime (glibc 2.35); see the *_RUNTIME_COMPAT_IMAGE pins above. The sources
+# are therefore repointed at the archive rather than moved to a newer Debian.
+RUN printf 'deb http://archive.debian.org/debian bullseye main\ndeb http://archive.debian.org/debian bullseye-updates main\n' \
+      > /etc/apt/sources.list && \
+    apt-get -o Acquire::Check-Valid-Until=false update && \
+    apt-get install -y --no-install-recommends \
       build-essential \
       pkg-config \
       libssl-dev && \
