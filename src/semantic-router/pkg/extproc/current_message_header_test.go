@@ -22,9 +22,11 @@ import (
 // locale and a connector list for the local assistants — while the typed turn
 // sits in PriorUserMessages, which is exactly what the header exists to fix.
 
-const memboxTypedTurn = "<current_user_request>where should I stay?</current_user_request>"
-const memboxMemoryBlock = "<memorybox_context>Potentially relevant context for this turn, not the current user request. trip to Kyoto in March; budget 2k</memorybox_context>"
-const memboxRuntimeBlock = `<runtime_capability_state non_actionable="true">current_time: 2026-09-08T16:00-07:00; locale: en-US; connectors: none</runtime_capability_state>`
+const (
+	memboxTypedTurn    = "<current_user_request>where should I stay?</current_user_request>"
+	memboxMemoryBlock  = "<memorybox_context>Potentially relevant context for this turn, not the current user request. trip to Kyoto in March; budget 2k</memorybox_context>"
+	memboxRuntimeBlock = `<runtime_capability_state non_actionable="true">current_time: 2026-09-08T16:00-07:00; locale: en-US; connectors: none</runtime_capability_state>`
+)
 
 // memboxChatBody marshals role/content pairs into an OpenAI request body, so the
 // fixtures can carry the blocks verbatim (the runtime block has quotes).
