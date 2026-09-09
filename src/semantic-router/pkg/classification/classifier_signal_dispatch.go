@@ -14,7 +14,23 @@ type signalDispatch struct {
 	evaluateBatch func([]*signalEvaluationRow)
 }
 
+// buildSignalDispatchers assembles the wave's dispatcher table. The groups below are split
+// by what each evaluator actually consumes - per-signal text, text plus an image, prior
+// conversation state, or conversation history - so a new signal family lands next to the
+// others reading the same inputs instead of extending one flat table. Dispatchers run one
+// goroutine each and write disjoint fields under the row mutex, so group order is not
+// observable.
 func (c *Classifier) buildSignalDispatchers() []signalDispatch {
+	dispatchers := make([]signalDispatch, 0, 17)
+	dispatchers = append(dispatchers, c.textSignalDispatchers()...)
+	dispatchers = append(dispatchers, c.multimodalSignalDispatchers()...)
+	dispatchers = append(dispatchers, c.conversationStateSignalDispatchers()...)
+	dispatchers = append(dispatchers, c.historyAwareSignalDispatchers()...)
+	return dispatchers
+}
+
+// textSignalDispatchers covers the families evaluated from the row's per-signal text alone.
+func (c *Classifier) textSignalDispatchers() []signalDispatch {
 	return []signalDispatch{
 		{
 			signalType: config.SignalTypeKeyword,
@@ -22,14 +38,6 @@ func (c *Classifier) buildSignalDispatchers() []signalDispatch {
 			evaluate: func(row *signalEvaluationRow) {
 				c.evaluateKeywordSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeKeyword))
 			},
-		},
-		{
-			signalType: config.SignalTypeEmbedding,
-			name:       "Embedding",
-			evaluate: func(row *signalEvaluationRow) {
-				c.evaluateEmbeddingSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeEmbedding), row.input.imageURL, row.imgCache)
-			},
-			evaluateBatch: c.evaluateEmbeddingSignalsBatch,
 		},
 		{
 			signalType: config.SignalTypeDomain,
@@ -47,6 +55,78 @@ func (c *Classifier) buildSignalDispatchers() []signalDispatch {
 			},
 			evaluateBatch: c.evaluateFactCheckSignalsBatch,
 		},
+		{
+			signalType: config.SignalTypePreference,
+			name:       "Preference",
+			evaluate: func(row *signalEvaluationRow) {
+				c.evaluatePreferenceSignal(row.results, &row.mu, row.textForSignal(config.SignalTypePreference))
+			},
+		},
+		{
+			signalType: config.SignalTypeLanguage,
+			name:       "Language",
+			evaluate: func(row *signalEvaluationRow) {
+				c.evaluateLanguageSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeLanguage))
+			},
+		},
+		{
+			signalType: config.SignalTypeStructure,
+			name:       "Structure",
+			evaluate: func(row *signalEvaluationRow) {
+				c.evaluateStructureSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeStructure))
+			},
+		},
+		{
+			signalType: config.SignalTypeModality,
+			name:       "Modality",
+			evaluate: func(row *signalEvaluationRow) {
+				c.evaluateModalitySignal(row.results, &row.mu, row.textForSignal(config.SignalTypeModality))
+			},
+		},
+		{
+			signalType: config.SignalTypeKB,
+			name:       "KB",
+			evaluate: func(row *signalEvaluationRow) {
+				c.evaluateKBSignals(row.results, &row.mu, row.textForSignal(config.SignalTypeKB))
+			},
+		},
+		{
+			signalType: config.SignalTypeEvent,
+			name:       "Event",
+			evaluate: func(row *signalEvaluationRow) {
+				c.evaluateEventSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeEvent))
+			},
+		},
+	}
+}
+
+// multimodalSignalDispatchers covers the families that also read the row's image attachment
+// and share the request-scoped image embedding cache.
+func (c *Classifier) multimodalSignalDispatchers() []signalDispatch {
+	return []signalDispatch{
+		{
+			signalType: config.SignalTypeEmbedding,
+			name:       "Embedding",
+			evaluate: func(row *signalEvaluationRow) {
+				c.evaluateEmbeddingSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeEmbedding), row.input.imageURL, row.imgCache)
+			},
+			evaluateBatch: c.evaluateEmbeddingSignalsBatch,
+		},
+		{
+			signalType: config.SignalTypeComplexity,
+			name:       "Complexity",
+			evaluate: func(row *signalEvaluationRow) {
+				c.evaluateComplexitySignal(row.results, &row.mu, row.textForSignal(config.SignalTypeComplexity), row.input.imageURL, row.imgCache)
+			},
+			evaluateBatch: c.evaluateComplexitySignalsBatch,
+		},
+	}
+}
+
+// conversationStateSignalDispatchers covers the families evaluated from state carried
+// alongside the current turn rather than from the turn's own text.
+func (c *Classifier) conversationStateSignalDispatchers() []signalDispatch {
+	return []signalDispatch{
 		{
 			signalType: config.SignalTypeUserFeedback,
 			name:       "User feedback",
@@ -67,20 +147,6 @@ func (c *Classifier) buildSignalDispatchers() []signalDispatch {
 			},
 		},
 		{
-			signalType: config.SignalTypePreference,
-			name:       "Preference",
-			evaluate: func(row *signalEvaluationRow) {
-				c.evaluatePreferenceSignal(row.results, &row.mu, row.textForSignal(config.SignalTypePreference))
-			},
-		},
-		{
-			signalType: config.SignalTypeLanguage,
-			name:       "Language",
-			evaluate: func(row *signalEvaluationRow) {
-				c.evaluateLanguageSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeLanguage))
-			},
-		},
-		{
 			signalType: config.SignalTypeContext,
 			name:       "Context",
 			evaluate: func(row *signalEvaluationRow) {
@@ -88,27 +154,19 @@ func (c *Classifier) buildSignalDispatchers() []signalDispatch {
 			},
 		},
 		{
-			signalType: config.SignalTypeStructure,
-			name:       "Structure",
+			signalType: config.SignalTypeConversation,
+			name:       "Conversation",
 			evaluate: func(row *signalEvaluationRow) {
-				c.evaluateStructureSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeStructure))
+				c.evaluateConversationSignal(row.results, &row.mu, row.input.convFacts)
 			},
 		},
-		{
-			signalType: config.SignalTypeComplexity,
-			name:       "Complexity",
-			evaluate: func(row *signalEvaluationRow) {
-				c.evaluateComplexitySignal(row.results, &row.mu, row.textForSignal(config.SignalTypeComplexity), row.input.imageURL, row.imgCache)
-			},
-			evaluateBatch: c.evaluateComplexitySignalsBatch,
-		},
-		{
-			signalType: config.SignalTypeModality,
-			name:       "Modality",
-			evaluate: func(row *signalEvaluationRow) {
-				c.evaluateModalitySignal(row.results, &row.mu, row.textForSignal(config.SignalTypeModality))
-			},
-		},
+	}
+}
+
+// historyAwareSignalDispatchers covers the safety families that score the current text
+// against the flattened conversation history.
+func (c *Classifier) historyAwareSignalDispatchers() []signalDispatch {
+	return []signalDispatch{
 		{
 			signalType: config.SignalTypeJailbreak,
 			name:       "Jailbreak",
@@ -121,27 +179,6 @@ func (c *Classifier) buildSignalDispatchers() []signalDispatch {
 			name:       "PII",
 			evaluate: func(row *signalEvaluationRow) {
 				c.evaluatePIISignal(row.results, &row.mu, row.textForSignal(config.SignalTypePII), historyForHistoryAwareSignals(row.input.priorUserMessages, row.input.nonUserMessages))
-			},
-		},
-		{
-			signalType: config.SignalTypeKB,
-			name:       "KB",
-			evaluate: func(row *signalEvaluationRow) {
-				c.evaluateKBSignals(row.results, &row.mu, row.textForSignal(config.SignalTypeKB))
-			},
-		},
-		{
-			signalType: config.SignalTypeConversation,
-			name:       "Conversation",
-			evaluate: func(row *signalEvaluationRow) {
-				c.evaluateConversationSignal(row.results, &row.mu, row.input.convFacts)
-			},
-		},
-		{
-			signalType: config.SignalTypeEvent,
-			name:       "Event",
-			evaluate: func(row *signalEvaluationRow) {
-				c.evaluateEventSignal(row.results, &row.mu, row.textForSignal(config.SignalTypeEvent))
 			},
 		},
 	}
