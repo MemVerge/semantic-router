@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	candle "github.com/vllm-project/semantic-router/candle-binding"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	metricspkg "github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"

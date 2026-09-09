@@ -13,11 +13,7 @@ fn test_modernbert_batch_exports_accept_an_empty_batch_without_a_model() {
 
     unsafe {
         assert_eq!(
-            crate::ffi::complexity::classify_complexity_text_batch(
-                ptr::null(),
-                0,
-                ptr::null_mut(),
-            ),
+            crate::ffi::complexity::classify_complexity_text_batch(ptr::null(), 0, ptr::null_mut(),),
             0
         );
         assert_eq!(
