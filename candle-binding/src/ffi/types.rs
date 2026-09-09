@@ -39,6 +39,24 @@ pub struct EmbeddingResult {
     pub processing_time_ms: f32,
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct MmBertBatchEmbeddingResult {
+    pub data: *mut f32,
+    pub rows: i32,
+    pub dimensions: i32,
+}
+
+impl Default for MmBertBatchEmbeddingResult {
+    fn default() -> Self {
+        Self {
+            data: std::ptr::null_mut(),
+            rows: 0,
+            dimensions: 0,
+        }
+    }
+}
+
 /// Tokenization result structure (matches Go C struct)
 #[repr(C)]
 #[derive(Debug)]
@@ -582,8 +600,15 @@ impl Default for MultiModalEmbeddingResult {
 }
 
 /// Validate that a C structure pointer is not null and properly aligned
+///
+/// # Safety
+///
+/// The function inspects only the address, never the pointee, so it cannot itself read out of
+/// bounds. It stays `unsafe` because a `true` here is only meaningful for a pointer whose
+/// provenance the caller already knows — null and alignment are necessary for a later
+/// dereference to be sound, not sufficient.
 pub unsafe fn validate_c_struct_ptr<T>(ptr: *const T) -> bool {
-    !ptr.is_null() && (ptr as usize) % std::mem::align_of::<T>() == 0
+    !ptr.is_null() && (ptr as usize).is_multiple_of(std::mem::align_of::<T>())
 }
 
 /// Get the size of any C structure for ABI compatibility checking

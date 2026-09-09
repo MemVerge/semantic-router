@@ -25,9 +25,9 @@ use crate::model_architectures::traditional::bert::{
     TRADITIONAL_BERT_CLASSIFIER, TRADITIONAL_BERT_TOKEN_CLASSIFIER,
 };
 use crate::model_architectures::traditional::modernbert::{
-    TRADITIONAL_MODERNBERT_CLASSIFIER, TRADITIONAL_MODERNBERT_FACT_CHECK_CLASSIFIER,
-    TRADITIONAL_MODERNBERT_JAILBREAK_CLASSIFIER, TRADITIONAL_MODERNBERT_PII_CLASSIFIER,
-    TRADITIONAL_MODERNBERT_TOKEN_CLASSIFIER,
+    TraditionalModernBertClassifier, TRADITIONAL_MODERNBERT_CLASSIFIER,
+    TRADITIONAL_MODERNBERT_FACT_CHECK_CLASSIFIER, TRADITIONAL_MODERNBERT_JAILBREAK_CLASSIFIER,
+    TRADITIONAL_MODERNBERT_PII_CLASSIFIER, TRADITIONAL_MODERNBERT_TOKEN_CLASSIFIER,
 };
 use crate::BertClassifier;
 use std::ffi::CString;
@@ -54,6 +54,114 @@ const SECURITY_THREAT_CLASS_STR: &str = "1";
 
 /// Keywords used to identify security threats in category names
 const SECURITY_THREAT_KEYWORDS: &[&str] = &["jailbreak", "unsafe", "threat"];
+
+/// Scatters one batch's verdicts onto the rows that produced them, and reports whether the batch
+/// itself faulted. The model saw the whole wave, so a fault here belongs to no single row: every
+/// row the batch covered keeps the `predicted_class: -1` it was initialised with, and the caller
+/// degrades the wave rather than charging any one request for it.
+pub(crate) fn scatter_modernbert_batch(
+    classified: Result<Vec<(usize, f32, Vec<f32>)>, candle_core::Error>,
+    valid_rows: &[usize],
+    rows: &mut [ModernBertClassificationResult],
+    model_name: &str,
+) -> bool {
+    match classified {
+        Ok(classified) if classified.len() == valid_rows.len() => {
+            for (slot, (class, confidence, _)) in valid_rows.iter().zip(classified) {
+                rows[*slot] = ModernBertClassificationResult {
+                    predicted_class: class as i32,
+                    confidence,
+                };
+            }
+            true
+        }
+        Ok(classified) => {
+            eprintln!(
+                "{} batch returned {} rows for {} inputs",
+                model_name,
+                classified.len(),
+                valid_rows.len()
+            );
+            false
+        }
+        Err(error) => {
+            eprintln!("{} batch classification failed: {}", model_name, error);
+            false
+        }
+    }
+}
+
+/// A wave batches independent requests, so a row must fail alone: an unreadable or unclassifiable
+/// row gets the scalar path's `predicted_class: -1` in its own slot and the wave still reports how
+/// many slots it wrote. `-1` is returned only for a fault no single request can cause - a null
+/// array, an uninitialised classifier, or a batch the model could not serve - so a caller can tell
+/// "this wave was not processed" from "some rows in it failed".
+pub(crate) unsafe fn classify_modernbert_text_batch(
+    classifier: Option<&TraditionalModernBertClassifier>,
+    texts: *const *const c_char,
+    num_texts: i32,
+    results: *mut ModernBertClassificationResult,
+    model_name: &str,
+) -> i32 {
+    if num_texts < 0 {
+        eprintln!("{} batch received invalid counts", model_name);
+        return -1;
+    }
+    if num_texts == 0 {
+        return 0;
+    }
+    if texts.is_null() || results.is_null() {
+        eprintln!("{} batch received a null array", model_name);
+        return -1;
+    }
+
+    let text_ptrs = std::slice::from_raw_parts(texts, num_texts as usize);
+    let mut rows = vec![
+        ModernBertClassificationResult {
+            predicted_class: -1,
+            confidence: 0.0,
+        };
+        text_ptrs.len()
+    ];
+    let mut valid_texts = Vec::with_capacity(text_ptrs.len());
+    let mut valid_rows = Vec::with_capacity(text_ptrs.len());
+    for (slot, text) in text_ptrs.iter().enumerate() {
+        if text.is_null() {
+            eprintln!("{} batch row {} is a null text", model_name, slot);
+            continue;
+        }
+        match CStr::from_ptr(*text).to_str() {
+            Ok(text) => {
+                valid_texts.push(text);
+                valid_rows.push(slot);
+            }
+            Err(_) => eprintln!("{} batch row {} is invalid UTF-8", model_name, slot),
+        }
+    }
+
+    let Some(classifier) = classifier else {
+        eprintln!("{} classifier not initialized", model_name);
+        return -1;
+    };
+
+    // `classify_batch` has no empty-slice path: it reshapes to [0, max_length] and forwards that.
+    let wave_served = valid_texts.is_empty()
+        || scatter_modernbert_batch(
+            classifier.classify_batch(&valid_texts),
+            &valid_rows,
+            &mut rows,
+            model_name,
+        );
+
+    // Written either way: on a batch fault the rows still carry -1, so a caller that ignores the
+    // return value degrades rather than reads uninitialised memory.
+    std::ptr::copy_nonoverlapping(rows.as_ptr(), results, rows.len());
+    if wave_served {
+        num_texts
+    } else {
+        -1
+    }
+}
 
 /// Load id2label mapping from model config.json file
 /// Returns HashMap mapping class index (as string) to label name
@@ -2094,6 +2202,24 @@ pub extern "C" fn classify_mmbert_32k_intent(
     }
 }
 
+/// # Safety
+///
+/// The pointer arguments must name readable and writable arrays matching their counts.
+#[no_mangle]
+pub unsafe extern "C" fn classify_mmbert_32k_intent_batch(
+    texts: *const *const c_char,
+    num_texts: i32,
+    results: *mut ModernBertClassificationResult,
+) -> i32 {
+    classify_modernbert_text_batch(
+        MMBERT_32K_INTENT_CLASSIFIER.get().map(Arc::as_ref),
+        texts,
+        num_texts,
+        results,
+        "mmBERT-32K intent",
+    )
+}
+
 /// Classify text using mmBERT-32K fact-check classifier
 ///
 /// Determines if text needs fact-checking.
@@ -2139,6 +2265,24 @@ pub extern "C" fn classify_mmbert_32k_factcheck(
         eprintln!("mmBERT-32K fact-check classifier not initialized");
         default_result
     }
+}
+
+/// # Safety
+///
+/// The pointer arguments must name readable and writable arrays matching their counts.
+#[no_mangle]
+pub unsafe extern "C" fn classify_mmbert_32k_factcheck_batch(
+    texts: *const *const c_char,
+    num_texts: i32,
+    results: *mut ModernBertClassificationResult,
+) -> i32 {
+    classify_modernbert_text_batch(
+        MMBERT_32K_FACTCHECK_CLASSIFIER.get().map(Arc::as_ref),
+        texts,
+        num_texts,
+        results,
+        "mmBERT-32K fact-check",
+    )
 }
 
 /// Classify text using mmBERT-32K jailbreak detector

@@ -119,6 +119,10 @@ type CategoryInference interface {
 	ClassifyWithProbabilities(text string) (candle_binding.ClassResultWithProbs, error)
 }
 
+type CategoryBatchInference interface {
+	ClassifyBatch(texts []string) ([]candle_binding.ClassResult, error)
+}
+
 type CategoryInferenceImpl struct{}
 
 func (c *CategoryInferenceImpl) Classify(text string) (candle_binding.ClassResult, error) {
@@ -190,6 +194,27 @@ func (c *MmBERT32KCategoryInferenceImpl) ClassifyWithProbabilities(text string) 
 		Class:      result.Class,
 		Confidence: result.Confidence,
 	}, nil
+}
+
+func (c *MmBERT32KCategoryInferenceImpl) ClassifyBatch(texts []string) ([]candle_binding.ClassResult, error) {
+	if c.getBackend() != "candle" {
+		results := make([]candle_binding.ClassResult, len(texts))
+		for i, text := range texts {
+			result, err := c.Classify(text)
+			if err != nil {
+				return nil, err
+			}
+			results[i] = result
+		}
+		return results, nil
+	}
+
+	start := time.Now()
+	results, err := candle_binding.ClassifyMmBert32KIntentBatch(texts)
+	elapsed := time.Since(start)
+	logging.Infof("[Perf] classifier batch inference (phase=request, backend=%s, rows=%d): %.3fms",
+		c.getBackend(), len(texts), float64(elapsed.Microseconds())/1000.0)
+	return results, err
 }
 
 // createMmBERT32KCategoryInference creates mmBERT-32K category inference.

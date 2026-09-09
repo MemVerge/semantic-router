@@ -4,8 +4,142 @@ use super::classify::*;
 use crate::ffi::types::*;
 use crate::test_fixtures::fixtures::*;
 use rstest::*;
-use std::ffi::{CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::ptr;
+
+#[test]
+fn test_modernbert_batch_exports_accept_an_empty_batch_without_a_model() {
+    let mut embedding = crate::ffi::types::MmBertBatchEmbeddingResult::default();
+
+    unsafe {
+        assert_eq!(
+            crate::ffi::complexity::classify_complexity_text_batch(ptr::null(), 0, ptr::null_mut(),),
+            0
+        );
+        assert_eq!(
+            classify_mmbert_32k_intent_batch(ptr::null(), 0, ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            classify_mmbert_32k_factcheck_batch(ptr::null(), 0, ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            crate::ffi::embedding::encode_mmbert_32k_text_embedding_batch(
+                ptr::null(),
+                0,
+                0,
+                &mut embedding,
+            ),
+            0
+        );
+    }
+    assert!(embedding.data.is_null());
+    assert_eq!(embedding.rows, 0);
+    assert_eq!(embedding.dimensions, 0);
+}
+
+#[test]
+fn test_modernbert_batch_classifier_rejects_bad_pointer_inputs() {
+    let text = CString::new("one row").unwrap();
+    let texts = [text.as_ptr()];
+    let mut output = [ModernBertClassificationResult {
+        predicted_class: -1,
+        confidence: 0.0,
+    }];
+
+    unsafe {
+        assert_eq!(
+            classify_mmbert_32k_intent_batch(ptr::null(), 1, output.as_mut_ptr()),
+            -1
+        );
+        assert_eq!(
+            classify_mmbert_32k_intent_batch(texts.as_ptr(), 1, ptr::null_mut()),
+            -1
+        );
+        assert_eq!(
+            classify_mmbert_32k_intent_batch(texts.as_ptr(), -1, output.as_mut_ptr()),
+            -1
+        );
+    }
+}
+
+#[test]
+fn test_modernbert_batch_classifier_validates_every_c_string_before_model_access() {
+    let mut output = [ModernBertClassificationResult {
+        predicted_class: -1,
+        confidence: 0.0,
+    }];
+    let null_texts = [ptr::null()];
+    let invalid_utf8 = [0xff_u8, 0];
+    let invalid_texts = [invalid_utf8.as_ptr().cast::<c_char>()];
+
+    unsafe {
+        assert_eq!(
+            classify_mmbert_32k_factcheck_batch(null_texts.as_ptr(), 1, output.as_mut_ptr()),
+            -1
+        );
+        assert_eq!(
+            classify_mmbert_32k_factcheck_batch(invalid_texts.as_ptr(), 1, output.as_mut_ptr()),
+            -1
+        );
+    }
+}
+
+fn batch_rows(count: usize) -> Vec<ModernBertClassificationResult> {
+    vec![
+        ModernBertClassificationResult {
+            predicted_class: -1,
+            confidence: 0.0,
+        };
+        count
+    ]
+}
+
+#[test]
+fn test_scatter_modernbert_batch_writes_only_the_rows_the_batch_covered() {
+    // Row 1 never reached the model (a null pointer or invalid UTF-8 upstream), so the batch
+    // covers rows 0 and 2 and row 1 must keep its own per-row failure.
+    let valid_rows = [0usize, 2];
+    let mut rows = batch_rows(3);
+
+    assert!(scatter_modernbert_batch(
+        Ok(vec![(4, 0.75, vec![]), (2, 0.5, vec![])]),
+        &valid_rows,
+        &mut rows,
+        "test",
+    ));
+
+    assert_eq!(rows[0].predicted_class, 4);
+    assert_eq!(rows[1].predicted_class, -1);
+    assert_eq!(rows[2].predicted_class, 2);
+}
+
+#[test]
+fn test_scatter_modernbert_batch_reports_a_batch_fault_without_touching_any_row() {
+    let valid_rows = [0usize, 2];
+
+    // A short result set is not attributable to any one row, so no row is written and the caller
+    // is told the wave was not served.
+    let mut rows = batch_rows(3);
+    assert!(!scatter_modernbert_batch(
+        Ok(vec![(1, 0.9, vec![])]),
+        &valid_rows,
+        &mut rows,
+        "test",
+    ));
+    assert!(rows.iter().all(|row| row.predicted_class == -1));
+
+    // Same for a model error.
+    let mut rows = batch_rows(3);
+    assert!(!scatter_modernbert_batch(
+        Err(candle_core::Error::Msg("batch failed".to_string())),
+        &valid_rows,
+        &mut rows,
+        "test",
+    ));
+    assert!(rows.iter().all(|row| row.predicted_class == -1));
+}
 
 /// Test load_id2label_from_config function with real model
 #[rstest]

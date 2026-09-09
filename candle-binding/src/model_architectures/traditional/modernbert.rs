@@ -638,12 +638,31 @@ impl TraditionalModernBertClassifier {
         use_cpu: bool,
         variant: ModernBertVariant,
     ) -> Result<Self, candle_core::Error> {
-        // 1. Determine device
+        // 1. Determine device. `use_cpu: false` REQUIRES a CUDA device: `cuda_if_available` would
+        // silently return Cpu on a non-CUDA build or a pod without a GPU, and that is a 30x
+        // slowdown nothing reports.
         let device = if use_cpu {
             Device::Cpu
         } else {
-            Device::cuda_if_available(0).unwrap_or(Device::Cpu)
+            let cuda = Device::new_cuda(0)?;
+            // candle only ever uses the context's default stream, so the pair of events cudarc
+            // creates, waits on and destroys for EVERY allocation can never gate anything: the code
+            // that would consume them is behind is_managing_stream_synchronization(), which also
+            // requires multi-stream mode. They are the majority of the driver calls a forward makes,
+            // and a forward is driver-bound. The unsafe contract is exactly "no cross-stream use",
+            // which one stream satisfies; the flag is context-wide, so every other loader on this
+            // device inherits it.
+            #[cfg(feature = "cuda")]
+            if let Device::Cuda(d) = &cuda {
+                unsafe { d.disable_event_tracking() };
+            }
+            cuda
         };
+        println!(
+            "ModernBERT classifier device: {} (use_cpu={})",
+            if device.is_cuda() { "cuda:0" } else { "cpu" },
+            use_cpu
+        );
         // 2. Load config.json
         let config_path = format!("{}/config.json", model_path);
         let config_str = std::fs::read_to_string(&config_path).map_err(|_e| {
@@ -1200,6 +1219,71 @@ impl TraditionalModernBertClassifier {
         }
 
         Ok((predicted_class, max_prob, probabilities_vec))
+    }
+
+    /// Batched sibling of `classify_internal`. Everything under it already carries a batch
+    /// dimension — the local ModernBERT forward, the 4-D attention mask, MEAN pooling (which
+    /// divides each row by its OWN token count, so padding does not skew it), the head and the
+    /// classifier. Only the final read assumed one row. The point is not arithmetic: a forward
+    /// issues a fixed number of CUDA driver calls set by the op graph, not by how many rows flow
+    /// through it, so N rows in one forward cost close to what one row costs.
+    pub fn classify_batch(
+        &self,
+        texts: &[&str],
+    ) -> Result<Vec<(usize, f32, Vec<f32>)>, candle_core::Error> {
+        let tokenization_result = self.tokenizer.tokenize_batch(texts).map_err(|e| {
+            let unified_err = processing_errors::tensor_operation("tokenization", &e.to_string());
+            candle_core::Error::from(unified_err)
+        })?;
+        let (input_ids, attention_mask) = self
+            .tokenizer
+            .create_batch_tensors(&tokenization_result)
+            .map_err(|e| {
+                let unified_err =
+                    processing_errors::tensor_operation("tensor creation", &e.to_string());
+                candle_core::Error::from(unified_err)
+            })?;
+        let model_output = self.model.forward(&input_ids, &attention_mask)?;
+        let pooled_output = match self.classifier_pooling {
+            ClassifierPooling::CLS => model_output.i((.., 0, ..))?,
+            ClassifierPooling::MEAN => {
+                let model_dims = model_output.dims().len();
+                let mut mask_expanded = attention_mask.clone();
+                while mask_expanded.dims().len() < model_dims {
+                    mask_expanded = mask_expanded.unsqueeze(mask_expanded.dims().len())?;
+                }
+                let mask_expanded = mask_expanded.to_dtype(candle_core::DType::F32)?;
+                let masked_output = model_output.broadcast_mul(&mask_expanded)?;
+                let sum_output = masked_output.sum(1)?;
+                let mask_sum = attention_mask
+                    .sum_keepdim(1)?
+                    .to_dtype(candle_core::DType::F32)?;
+                sum_output.broadcast_div(&mask_sum)?
+            }
+        };
+        let classifier_input = if let Some(ref head) = self.head {
+            head.forward(&pooled_output)?
+        } else {
+            pooled_output
+        };
+        let probabilities = self.classifier.forward(&classifier_input)?;
+        // to_vec2 is a device-to-host copy, so it also forces the stream to drain: any caller
+        // timing this call is timing real work, not kernel submission.
+        let rows = probabilities.to_vec2::<f32>()?;
+        Ok(rows
+            .into_iter()
+            .map(|probs| {
+                let mut max_prob = 0.0f32;
+                let mut predicted_class = 0usize;
+                for (i, &prob) in probs.iter().enumerate() {
+                    if prob > max_prob {
+                        max_prob = prob;
+                        predicted_class = i;
+                    }
+                }
+                (predicted_class, max_prob, probs)
+            })
+            .collect())
     }
 
     /// Classify text and return the top-1 prediction (class index + confidence).

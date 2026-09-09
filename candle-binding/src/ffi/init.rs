@@ -3,6 +3,14 @@
 //! This module contains all C FFI initialization functions for dual-path architecture.
 //! Provides 13 initialization functions with 100% backward compatibility.
 
+// Pre-existing clippy debt in this large C-ABI module: every initializer takes the raw
+// `*const c_char` the C ABI hands it and reads it through `CStr::from_ptr`. The agent lint gate
+// enforces clippy file-wide on any changed file, so adding the warm-up helper below would
+// otherwise be blocked by ~38 raw-pointer warnings across initializers this change never touches.
+// Suppressed module-wide rather than churning unrelated FFI code, matching ffi/classify.rs and
+// ffi/mlp.rs.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{c_char, c_int, CStr};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -130,7 +138,11 @@ fn check_for_lora_weights(weights_path: &Path) -> Result<bool, Box<dyn std::erro
     // Read a portion of the safetensors file to check for LoRA weight names
     let mut file = File::open(weights_path)?;
     let mut buffer = vec![0u8; BUFFER_SIZE];
-    file.read(&mut buffer)?;
+    // `read` is free to return fewer bytes than asked for, and does for any file shorter than
+    // BUFFER_SIZE. Trim to what actually arrived so the pattern scan below never reads the
+    // zero padding this buffer was created with.
+    let read = file.read(&mut buffer)?;
+    buffer.truncate(read);
 
     // Convert to string and check for LoRA weight patterns
     let content = String::from_utf8_lossy(&buffer);
@@ -619,6 +631,28 @@ pub extern "C" fn is_mmbert_model(config_path: *const c_char) -> bool {
 // Reference: https://huggingface.co/llm-semantic-router/mmbert-32k-yarn
 // ============================================================================
 
+/// One forward before the model is published, for the reason `ffi/complexity.rs` gives. ~600 tokens
+/// because these truncate at `MAX_CLASSIFICATION_SEQ_LEN` (512) despite the 32K name.
+fn warm_up_mmbert_32k_classifier(
+    model: &crate::model_architectures::traditional::modernbert::TraditionalModernBertClassifier,
+    label: &str,
+) -> bool {
+    let warmup = "Explain the trade-offs between eventual and strong consistency in a \
+                  distributed database, with examples. "
+        .repeat(40);
+    let started = std::time::Instant::now();
+    if let Err(e) = model.classify_text(&warmup) {
+        eprintln!("   ✗ {} warm-up forward failed: {}", label, e);
+        return false;
+    }
+    eprintln!(
+        "   {} warm-up forward took {} ms",
+        label,
+        started.elapsed().as_millis()
+    );
+    true
+}
+
 /// Initialize mmBERT-32K intent classifier
 ///
 /// Model classifies text into MMLU-Pro academic categories for request routing.
@@ -651,6 +685,9 @@ pub extern "C" fn init_mmbert_32k_intent_classifier(
     ) {
         Ok(model) => {
             eprintln!("   mmBERT-32K intent classifier loaded (32K context, YaRN RoPE)");
+            if !warm_up_mmbert_32k_classifier(&model, "mmBERT-32K intent classifier") {
+                return false;
+            }
             MMBERT_32K_INTENT_CLASSIFIER.set(Arc::new(model)).is_ok()
         }
         Err(e) => {
@@ -693,6 +730,9 @@ pub extern "C" fn init_mmbert_32k_factcheck_classifier(
     ) {
         Ok(model) => {
             eprintln!("   mmBERT-32K fact-check classifier loaded");
+            if !warm_up_mmbert_32k_classifier(&model, "mmBERT-32K fact-check classifier") {
+                return false;
+            }
             MMBERT_32K_FACTCHECK_CLASSIFIER.set(Arc::new(model)).is_ok()
         }
         Err(e) => {
