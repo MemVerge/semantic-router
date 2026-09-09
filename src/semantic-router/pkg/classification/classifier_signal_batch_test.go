@@ -62,29 +62,8 @@ func TestSignalBatchCollectorFlushesThirtyTwoImmediatelyAndKeepsNextGeneration(t
 	for i := range signalBatchMaxSize {
 		results[i] = collector.enqueue(signalEvaluationInput{text: fmt.Sprintf("row-%02d", i)})
 	}
-	select {
-	case got := <-batchSizes:
-		if got != signalBatchMaxSize {
-			t.Fatalf("full batch size = %d, want %d", got, signalBatchMaxSize)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("full batch did not flush immediately")
-	}
-	collected := make([]*SignalResults, len(results))
-	for i, resultCh := range results {
-		result := <-resultCh
-		collected[i] = result
-		want := signalBatchTestMarker(fmt.Sprintf("row-%02d", i))
-		if got := result.SignalValues["row"]; got != want {
-			t.Fatalf("row %d marker = %v, want %v", i, got, want)
-		}
-	}
-	collected[0].SignalValues["cross-request"] = 1
-	for i := 1; i < len(collected); i++ {
-		if _, ok := collected[i].SignalValues["cross-request"]; ok {
-			t.Fatalf("result %d shares its SignalValues map with row 0", i)
-		}
-	}
+	awaitSignalBatchSize(t, batchSizes, signalBatchMaxSize, "full batch")
+	assertSignalValuesNotShared(t, collectSignalBatchResults(t, results))
 
 	collector.mu.Lock()
 	staleGeneration := collector.generation
@@ -306,6 +285,48 @@ func TestSignalBatchingIsPerClassifierAndIgnoresConfiguredMaxBatchSize(t *testin
 	case <-result:
 	case <-time.After(time.Second):
 		t.Fatal("fixed 32-row batch did not flush")
+	}
+}
+
+// awaitSignalBatchSize waits for the collector to report one evaluated batch and asserts its
+// size, so each size assertion does not re-implement the receive-or-time-out dance.
+func awaitSignalBatchSize(t *testing.T, sizes <-chan int, want int, what string) {
+	t.Helper()
+	select {
+	case got := <-sizes:
+		if got != want {
+			t.Fatalf("%s size = %d, want %d", what, got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("%s did not flush", what)
+	}
+}
+
+// collectSignalBatchResults drains one result per enqueued row and asserts each row got its
+// own marker back, which is what proves the batch stayed aligned with the enqueue order.
+func collectSignalBatchResults(t *testing.T, results []<-chan *SignalResults) []*SignalResults {
+	t.Helper()
+	collected := make([]*SignalResults, len(results))
+	for i, resultCh := range results {
+		result := <-resultCh
+		collected[i] = result
+		want := signalBatchTestMarker(fmt.Sprintf("row-%02d", i))
+		if got := result.SignalValues["row"]; got != want {
+			t.Fatalf("row %d marker = %v, want %v", i, got, want)
+		}
+	}
+	return collected
+}
+
+// assertSignalValuesNotShared proves the collector handed every row its own SignalValues map:
+// mutating row 0 must stay invisible to its siblings.
+func assertSignalValuesNotShared(t *testing.T, collected []*SignalResults) {
+	t.Helper()
+	collected[0].SignalValues["cross-request"] = 1
+	for i := 1; i < len(collected); i++ {
+		if _, ok := collected[i].SignalValues["cross-request"]; ok {
+			t.Fatalf("result %d shares its SignalValues map with row 0", i)
+		}
 	}
 }
 

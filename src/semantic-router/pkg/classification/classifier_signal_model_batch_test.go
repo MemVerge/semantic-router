@@ -112,12 +112,7 @@ func TestSignalModelFamiliesUseOneSharedBatchInFIFOOrder(t *testing.T) {
 		{config.SignalTypeFactCheck, "no_fact_check_needed"},
 		{config.SignalTypeEmbedding, "topic"},
 	}
-	extractionsBefore := make([]float64, len(metricLabels))
-	matchesBefore := make([]float64, len(metricLabels))
-	for i, labels := range metricLabels {
-		extractionsBefore[i] = testutil.ToFloat64(metricspkg.SignalExtractionTotal.WithLabelValues(labels[0], labels[1]))
-		matchesBefore[i] = testutil.ToFloat64(metricspkg.SignalMatchTotal.WithLabelValues(labels[0], labels[1]))
-	}
+	extractionsBefore, matchesBefore := signalMetricCounters(metricLabels)
 	inputs := []signalEvaluationInput{
 		{
 			text:                   "compressed-first",
@@ -134,12 +129,7 @@ func TestSignalModelFamiliesUseOneSharedBatchInFIFOOrder(t *testing.T) {
 	assertStringSlice(t, "domain inputs", domain.inputs, wantInputs)
 	assertStringSlice(t, "fact-check inputs", factInputs, wantInputs)
 	assertStringSlice(t, "embedding inputs", embeddingInputs, wantInputs)
-	if complexity.batchCalls != 1 || complexity.scalarCalls != 0 {
-		t.Fatalf("complexity calls: batch=%d scalar=%d", complexity.batchCalls, complexity.scalarCalls)
-	}
-	if domain.batchCalls != 1 || domain.scalarCalls != 0 {
-		t.Fatalf("domain calls: batch=%d scalar=%d", domain.batchCalls, domain.scalarCalls)
-	}
+	assertOneBatchNoScalarRetry(t, complexity, domain)
 	if factCalls != 1 {
 		t.Fatalf("fact-check batch calls = %d, want 1", factCalls)
 	}
@@ -147,37 +137,9 @@ func TestSignalModelFamiliesUseOneSharedBatchInFIFOOrder(t *testing.T) {
 		t.Fatalf("embedding calls=%d targetDim=%d, want 1 and 3", embeddingCalls, embeddingTargetDim)
 	}
 
-	if !containsString(results[0].MatchedComplexityRules, "complexity:hard") ||
-		!containsString(results[1].MatchedComplexityRules, "complexity:easy") {
-		t.Fatalf("complexity row alignment failed: %v / %v", results[0].MatchedComplexityRules, results[1].MatchedComplexityRules)
-	}
-	if !containsString(results[0].MatchedDomainRules, "science") ||
-		!containsString(results[1].MatchedDomainRules, "math") {
-		t.Fatalf("domain row alignment failed: %v / %v", results[0].MatchedDomainRules, results[1].MatchedDomainRules)
-	}
-	if !containsString(results[0].MatchedFactCheckRules, "needs_fact_check") ||
-		!containsString(results[1].MatchedFactCheckRules, "no_fact_check_needed") {
-		t.Fatalf("fact-check row alignment failed: %v / %v", results[0].MatchedFactCheckRules, results[1].MatchedFactCheckRules)
-	}
-	if !containsString(results[0].MatchedEmbeddingRules, "topic") || containsString(results[1].MatchedEmbeddingRules, "topic") {
-		t.Fatalf("embedding row alignment failed: %v / %v", results[0].MatchedEmbeddingRules, results[1].MatchedEmbeddingRules)
-	}
-	for i, labels := range metricLabels {
-		extractionsAfter := testutil.ToFloat64(metricspkg.SignalExtractionTotal.WithLabelValues(labels[0], labels[1]))
-		matchesAfter := testutil.ToFloat64(metricspkg.SignalMatchTotal.WithLabelValues(labels[0], labels[1]))
-		if delta := extractionsAfter - extractionsBefore[i]; delta != 1 {
-			t.Fatalf("%s/%s extraction metric delta = %v, want 1", labels[0], labels[1], delta)
-		}
-		if delta := matchesAfter - matchesBefore[i]; delta != 1 {
-			t.Fatalf("%s/%s match metric delta = %v, want 1", labels[0], labels[1], delta)
-		}
-	}
-	if results[0].Metrics.Complexity.ExecutionTimeMs != results[1].Metrics.Complexity.ExecutionTimeMs ||
-		results[0].Metrics.Domain.ExecutionTimeMs != results[1].Metrics.Domain.ExecutionTimeMs ||
-		results[0].Metrics.FactCheck.ExecutionTimeMs != results[1].Metrics.FactCheck.ExecutionTimeMs ||
-		results[0].Metrics.Embedding.ExecutionTimeMs != results[1].Metrics.Embedding.ExecutionTimeMs {
-		t.Fatalf("model batch duration was not shared by row: %+v / %+v", results[0].Metrics, results[1].Metrics)
-	}
+	assertModelFamilyRowAlignment(t, results)
+	assertSignalMetricDeltas(t, metricLabels, extractionsBefore, matchesBefore)
+	assertBatchElapsedSharedByRow(t, results)
 }
 
 func TestComplexityBatchLengthMismatchFailsEveryRowWithoutScalarRetry(t *testing.T) {
@@ -423,24 +385,11 @@ func TestSignalModelBatchFailureDoesNotRetryAndCheapFamilyStillCompletes(t *test
 		{text: "first", forceEvaluateAll: true},
 		{text: "second", forceEvaluateAll: true},
 	}, true)
-	if complexity.batchCalls != 1 || complexity.scalarCalls != 0 {
-		t.Fatalf("complexity calls: batch=%d scalar=%d", complexity.batchCalls, complexity.scalarCalls)
-	}
-	if domain.batchCalls != 1 || domain.scalarCalls != 0 {
-		t.Fatalf("domain calls: batch=%d scalar=%d", domain.batchCalls, domain.scalarCalls)
-	}
+	assertOneBatchNoScalarRetry(t, complexity, domain)
 	if factCalls != 1 || embeddingCalls != 1 {
 		t.Fatalf("fact-check calls=%d embedding calls=%d, want one each", factCalls, embeddingCalls)
 	}
-	for i, result := range results {
-		if len(result.MatchedComplexityRules) != 0 || len(result.MatchedDomainRules) != 0 ||
-			len(result.MatchedFactCheckRules) != 0 || len(result.MatchedEmbeddingRules) != 0 {
-			t.Fatalf("row %d retained a failed model-family result: %+v", i, result)
-		}
-		if !containsString(result.MatchedKeywordRules, "cheap") {
-			t.Fatalf("row %d cheap family did not complete: %v", i, result.MatchedKeywordRules)
-		}
-	}
+	assertModelFamiliesDroppedCheapFamilyKept(t, results, "cheap")
 }
 
 func newFourFamilyBatchTestClassifier(t *testing.T, complexity ComplexityInference, domain CategoryInference) *Classifier {
@@ -510,6 +459,94 @@ func fourModelSignalTypes() map[string]bool {
 		config.SignalTypeDomain:     true,
 		config.SignalTypeFactCheck:  true,
 		config.SignalTypeEmbedding:  true,
+	}
+}
+
+// signalMetricCounters snapshots the extraction and match counters for the given
+// signal/label pairs, so a test can assert exact deltas across one wave.
+func signalMetricCounters(labels [][2]string) ([]float64, []float64) {
+	extractions := make([]float64, len(labels))
+	matches := make([]float64, len(labels))
+	for i, l := range labels {
+		extractions[i] = testutil.ToFloat64(metricspkg.SignalExtractionTotal.WithLabelValues(l[0], l[1]))
+		matches[i] = testutil.ToFloat64(metricspkg.SignalMatchTotal.WithLabelValues(l[0], l[1]))
+	}
+	return extractions, matches
+}
+
+// assertSignalMetricDeltas asserts every labelled counter advanced by exactly one: the shared
+// batch must record one extraction and one match per row, never double-count a family.
+func assertSignalMetricDeltas(t *testing.T, labels [][2]string, extractionsBefore, matchesBefore []float64) {
+	t.Helper()
+	for i, l := range labels {
+		extraction := testutil.ToFloat64(metricspkg.SignalExtractionTotal.WithLabelValues(l[0], l[1]))
+		match := testutil.ToFloat64(metricspkg.SignalMatchTotal.WithLabelValues(l[0], l[1]))
+		if delta := extraction - extractionsBefore[i]; delta != 1 {
+			t.Fatalf("%s/%s extraction metric delta = %v, want 1", l[0], l[1], delta)
+		}
+		if delta := match - matchesBefore[i]; delta != 1 {
+			t.Fatalf("%s/%s match metric delta = %v, want 1", l[0], l[1], delta)
+		}
+	}
+}
+
+// assertOneBatchNoScalarRetry asserts both model families served the wave from a single
+// batched call and never fell back to the scalar entry point.
+func assertOneBatchNoScalarRetry(t *testing.T, complexity *complexityBatchSpy, domain *categoryBatchSpy) {
+	t.Helper()
+	if complexity.batchCalls != 1 || complexity.scalarCalls != 0 {
+		t.Fatalf("complexity calls: batch=%d scalar=%d", complexity.batchCalls, complexity.scalarCalls)
+	}
+	if domain.batchCalls != 1 || domain.scalarCalls != 0 {
+		t.Fatalf("domain calls: batch=%d scalar=%d", domain.batchCalls, domain.scalarCalls)
+	}
+}
+
+// assertModelFamilyRowAlignment asserts each family's batched verdicts landed on the row that
+// produced them: row 0 takes the first result of every batch, row 1 the second.
+func assertModelFamilyRowAlignment(t *testing.T, results []*SignalResults) {
+	t.Helper()
+	if !containsString(results[0].MatchedComplexityRules, "complexity:hard") ||
+		!containsString(results[1].MatchedComplexityRules, "complexity:easy") {
+		t.Fatalf("complexity row alignment failed: %v / %v", results[0].MatchedComplexityRules, results[1].MatchedComplexityRules)
+	}
+	if !containsString(results[0].MatchedDomainRules, "science") ||
+		!containsString(results[1].MatchedDomainRules, "math") {
+		t.Fatalf("domain row alignment failed: %v / %v", results[0].MatchedDomainRules, results[1].MatchedDomainRules)
+	}
+	if !containsString(results[0].MatchedFactCheckRules, "needs_fact_check") ||
+		!containsString(results[1].MatchedFactCheckRules, "no_fact_check_needed") {
+		t.Fatalf("fact-check row alignment failed: %v / %v", results[0].MatchedFactCheckRules, results[1].MatchedFactCheckRules)
+	}
+	if !containsString(results[0].MatchedEmbeddingRules, "topic") || containsString(results[1].MatchedEmbeddingRules, "topic") {
+		t.Fatalf("embedding row alignment failed: %v / %v", results[0].MatchedEmbeddingRules, results[1].MatchedEmbeddingRules)
+	}
+}
+
+// assertBatchElapsedSharedByRow asserts both rows recorded the same per-family duration,
+// which is what proves one shared inference served the wave instead of two.
+func assertBatchElapsedSharedByRow(t *testing.T, results []*SignalResults) {
+	t.Helper()
+	if results[0].Metrics.Complexity.ExecutionTimeMs != results[1].Metrics.Complexity.ExecutionTimeMs ||
+		results[0].Metrics.Domain.ExecutionTimeMs != results[1].Metrics.Domain.ExecutionTimeMs ||
+		results[0].Metrics.FactCheck.ExecutionTimeMs != results[1].Metrics.FactCheck.ExecutionTimeMs ||
+		results[0].Metrics.Embedding.ExecutionTimeMs != results[1].Metrics.Embedding.ExecutionTimeMs {
+		t.Fatalf("model batch duration was not shared by row: %+v / %+v", results[0].Metrics, results[1].Metrics)
+	}
+}
+
+// assertModelFamiliesDroppedCheapFamilyKept asserts a failed shared batch leaves no partial
+// model-family verdict on any row while the non-model families still complete.
+func assertModelFamiliesDroppedCheapFamilyKept(t *testing.T, results []*SignalResults, cheapRule string) {
+	t.Helper()
+	for i, result := range results {
+		if len(result.MatchedComplexityRules) != 0 || len(result.MatchedDomainRules) != 0 ||
+			len(result.MatchedFactCheckRules) != 0 || len(result.MatchedEmbeddingRules) != 0 {
+			t.Fatalf("row %d retained a failed model-family result: %+v", i, result)
+		}
+		if !containsString(result.MatchedKeywordRules, cheapRule) {
+			t.Fatalf("row %d cheap family did not complete: %v", i, result.MatchedKeywordRules)
+		}
 	}
 }
 
