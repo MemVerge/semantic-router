@@ -150,12 +150,21 @@ func (c *Classifier) buildSignalDispatchers() []signalDispatch {
 func runSignalDispatchers(dispatchers []signalDispatch, rows []*signalEvaluationRow, ready map[string]bool, batchModels bool, wg *sync.WaitGroup) {
 	for _, d := range dispatchers {
 		eligible := make([]*signalEvaluationRow, 0, len(rows))
+		unused := 0
 		for _, row := range rows {
-			if isSignalTypeUsed(row.usedSignals, d.signalType) && ready[d.signalType] {
-				eligible = append(eligible, row)
-			} else if !isSignalTypeUsed(row.usedSignals, d.signalType) {
-				logging.Debugf("[Signal Computation] %s signal not used in any decision, skipping evaluation", d.name)
+			if !isSignalTypeUsed(row.usedSignals, d.signalType) {
+				unused++
+				continue
 			}
+			if ready[d.signalType] {
+				eligible = append(eligible, row)
+			}
+		}
+		// One line per dispatcher, not per row: a wave carries up to 32 rows and the
+		// message identifies only the signal, so logging inside the row loop repeated
+		// the same text 32 times and allocated an args slice for each.
+		if unused > 0 {
+			logging.Debugf("[Signal Computation] %s signal not used in any decision for %d of %d rows, skipping evaluation", d.name, unused, len(rows))
 		}
 		if len(eligible) == 0 {
 			continue

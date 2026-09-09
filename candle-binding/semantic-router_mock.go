@@ -3,7 +3,6 @@
 package candle_binding
 
 import (
-	"fmt"
 	"log"
 	"runtime"
 	"strings"
