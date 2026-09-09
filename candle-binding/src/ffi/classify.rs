@@ -55,10 +55,47 @@ const SECURITY_THREAT_CLASS_STR: &str = "1";
 /// Keywords used to identify security threats in category names
 const SECURITY_THREAT_KEYWORDS: &[&str] = &["jailbreak", "unsafe", "threat"];
 
+/// Scatters one batch's verdicts onto the rows that produced them, and reports whether the batch
+/// itself faulted. The model saw the whole wave, so a fault here belongs to no single row: every
+/// row the batch covered keeps the `predicted_class: -1` it was initialised with, and the caller
+/// degrades the wave rather than charging any one request for it.
+pub(crate) fn scatter_modernbert_batch(
+    classified: Result<Vec<(usize, f32, Vec<f32>)>, candle_core::Error>,
+    valid_rows: &[usize],
+    rows: &mut [ModernBertClassificationResult],
+    model_name: &str,
+) -> bool {
+    match classified {
+        Ok(classified) if classified.len() == valid_rows.len() => {
+            for (slot, (class, confidence, _)) in valid_rows.iter().zip(classified) {
+                rows[*slot] = ModernBertClassificationResult {
+                    predicted_class: class as i32,
+                    confidence,
+                };
+            }
+            true
+        }
+        Ok(classified) => {
+            eprintln!(
+                "{} batch returned {} rows for {} inputs",
+                model_name,
+                classified.len(),
+                valid_rows.len()
+            );
+            false
+        }
+        Err(error) => {
+            eprintln!("{} batch classification failed: {}", model_name, error);
+            false
+        }
+    }
+}
+
 /// A wave batches independent requests, so a row must fail alone: an unreadable or unclassifiable
-/// row gets the scalar path's `predicted_class: -1` in its own slot. `-1` is returned only for a
-/// fault no single request can cause, so a caller can still tell "this wave was not processed"
-/// from "some rows in it failed".
+/// row gets the scalar path's `predicted_class: -1` in its own slot and the wave still reports how
+/// many slots it wrote. `-1` is returned only for a fault no single request can cause - a null
+/// array, an uninitialised classifier, or a batch the model could not serve - so a caller can tell
+/// "this wave was not processed" from "some rows in it failed".
 pub(crate) unsafe fn classify_modernbert_text_batch(
     classifier: Option<&TraditionalModernBertClassifier>,
     texts: *const *const c_char,
@@ -108,29 +145,22 @@ pub(crate) unsafe fn classify_modernbert_text_batch(
     };
 
     // `classify_batch` has no empty-slice path: it reshapes to [0, max_length] and forwards that.
-    if !valid_texts.is_empty() {
-        match classifier.classify_batch(&valid_texts) {
-            Ok(classified) if classified.len() == valid_texts.len() => {
-                for (slot, (class, confidence, _)) in valid_rows.iter().zip(classified) {
-                    rows[*slot] = ModernBertClassificationResult {
-                        predicted_class: class as i32,
-                        confidence,
-                    };
-                }
-            }
-            // A batch fault is not attributable to any one row, so every row it covered degrades.
-            Ok(classified) => eprintln!(
-                "{} batch returned {} rows for {} inputs",
-                model_name,
-                classified.len(),
-                valid_texts.len()
-            ),
-            Err(error) => eprintln!("{} batch classification failed: {}", model_name, error),
-        }
-    }
+    let wave_served = valid_texts.is_empty()
+        || scatter_modernbert_batch(
+            classifier.classify_batch(&valid_texts),
+            &valid_rows,
+            &mut rows,
+            model_name,
+        );
 
+    // Written either way: on a batch fault the rows still carry -1, so a caller that ignores the
+    // return value degrades rather than reads uninitialised memory.
     std::ptr::copy_nonoverlapping(rows.as_ptr(), results, rows.len());
-    num_texts
+    if wave_served {
+        num_texts
+    } else {
+        -1
+    }
 }
 
 /// Load id2label mapping from model config.json file
