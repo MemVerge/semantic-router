@@ -149,10 +149,9 @@ func CanonicalGlobalFromRouterConfig(cfg *RouterConfig) *CanonicalGlobal {
 				MaxBytes:   cfg.MaxStreamedBodyBytes,
 				TimeoutSec: cfg.StreamedBodyTimeoutSec,
 			},
-			SkipProcessing:       cfg.SkipProcessing,
-			CurrentMessageHeader: cfg.CurrentMessageHeader,
-			ModelSelection:       cfg.ModelSelection,
-			Learning:             cfg.RouterLearning,
+			SkipProcessing: cfg.SkipProcessing,
+			ModelSelection: cfg.ModelSelection,
+			Learning:       cfg.RouterLearning,
 		},
 		Services: CanonicalServiceGlobal{
 			API:           cfg.API,

@@ -55,7 +55,6 @@ func (r *OpenAIRouter) extractFastRequestState(
 		metrics.RecordModelRequest(ctx.RequestModel)
 		return nil, status.Errorf(codes.InvalidArgument, "invalid request body: %v", err)
 	}
-	r.applyCurrentMessageHeader(fast, ctx)
 	if fast.Stream {
 		logging.ComponentDebugEvent("extproc", "stream_parameter_detected", map[string]interface{}{
 			"request_id": ctx.RequestID,
