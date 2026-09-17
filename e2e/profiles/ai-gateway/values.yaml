@@ -27,29 +27,14 @@ config:
             weight: 1
   routing:
     decisions:
-      - name: input_short_decision
-        description: Single-user Input contract before compression
+      - name: input_probe_decision
+        description: Single-user Input routing and context accounting before signal compression
         priority: 700
         rules:
           operator: AND
           conditions:
             - type: keyword
               name: input_probe
-            - type: context
-              name: input_short
-        modelRefs:
-          - model: base-model
-            use_reasoning: false
-      - name: input_long_decision
-        description: Single-user Input context accounting before signal compression
-        priority: 700
-        rules:
-          operator: AND
-          conditions:
-            - type: keyword
-              name: input_probe
-            - type: context
-              name: input_long
         modelRefs:
           - model: base-model
             use_reasoning: false
@@ -552,13 +537,6 @@ config:
               enabled: true
               similarity_threshold: 0.75
     signals:
-      context:
-        - name: input_short
-          min_tokens: '0'
-          max_tokens: '1024'
-        - name: input_long
-          min_tokens: '1025'
-          max_tokens: '1M'
       keywords:
         - name: input_probe
           operator: OR

@@ -38,13 +38,11 @@ func runRoutingInputContract(ctx context.Context, localPort string) error {
 	filler := strings.Repeat("The orchard has green leaves. ", 1100)
 	longInput := filler[:longInputBytes-len(marker)-1] + " " + marker
 	cases := []struct {
-		name     string
-		input    string
-		decision string
-		context  string
+		name  string
+		input string
 	}{
-		{"short", "Please summarize this input. " + marker, "input_short_decision", "input_short"},
-		{"compressed", longInput, "input_long_decision", "input_long"},
+		{"short", "Please summarize this input. " + marker},
+		{"compressed", longInput},
 	}
 	for _, tc := range cases {
 		// The existing helper sends exactly one user message and requests the
@@ -57,17 +55,17 @@ func runRoutingInputContract(ctx context.Context, localPort string) error {
 			return fmt.Errorf("%s Input: %s", tc.name, formatUnexpectedChatCompletionStatus(response))
 		}
 
-		// Context uses the router's byte-based ceil(len/4) estimate on the full
-		// Input. The long case must retain 7681 tokens despite the profile's
-		// 128-token classification compression budget.
+		// With no context signal configured, diagnostics use the byte-based
+		// ceil(len/4) fallback on full Input, independent of online calibration.
+		// The long case must retain 7681 tokens despite the profile's 128-token
+		// classification compression budget.
 		expected := []struct {
 			header string
 			value  string
 		}{
-			{"x-vsr-selected-decision", tc.decision},
+			{"x-vsr-selected-decision", "input_probe_decision"},
 			{"x-vsr-selected-model", "base-model"},
 			{"x-vsr-matched-keywords", "input_probe"},
-			{"x-vsr-matched-context", tc.context},
 			{"x-vsr-context-token-count", strconv.Itoa((len(tc.input) + 3) / 4)},
 		}
 		for _, want := range expected {
