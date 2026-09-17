@@ -27,6 +27,32 @@ config:
             weight: 1
   routing:
     decisions:
+      - name: input_short_decision
+        description: Single-user Input contract before compression
+        priority: 700
+        rules:
+          operator: AND
+          conditions:
+            - type: keyword
+              name: input_probe
+            - type: context
+              name: input_short
+        modelRefs:
+          - model: base-model
+            use_reasoning: false
+      - name: input_long_decision
+        description: Single-user Input context accounting before signal compression
+        priority: 700
+        rules:
+          operator: AND
+          conditions:
+            - type: keyword
+              name: input_probe
+            - type: context
+              name: input_long
+        modelRefs:
+          - model: base-model
+            use_reasoning: false
       - name: block_jailbreak
         description: Block jailbreak attempts
         priority: 1000
@@ -526,7 +552,19 @@ config:
               enabled: true
               similarity_threshold: 0.75
     signals:
+      context:
+        - name: input_short
+          min_tokens: '0'
+          max_tokens: '1024'
+        - name: input_long
+          min_tokens: '1025'
+          max_tokens: '1M'
       keywords:
+        - name: input_probe
+          operator: OR
+          keywords:
+            - __ROUTING_INPUT_PROBE__
+          case_sensitive: true
         - name: thinking
           operator: OR
           keywords:
@@ -642,6 +680,13 @@ config:
       strategy: priority
     model_catalog:
       kbs: []
+      modules:
+        prompt_compression:
+          enabled: true
+          max_tokens: 128
+          # Leave ordinary short baseline requests uncompressed.
+          min_length: 30000
+          skip_signals: [keyword, jailbreak, pii]
     services:
       api:
         batch_classification:
