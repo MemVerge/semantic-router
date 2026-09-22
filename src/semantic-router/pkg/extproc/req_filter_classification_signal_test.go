@@ -1,6 +1,9 @@
 package extproc
 
 import (
+	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +12,69 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 )
+
+func TestSingleInputContextDecisionBeforeCompression(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"short", "Summarize."},
+		{"long", strings.Repeat("The orchard has green leaves. ", 400) + "Summarize."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.RouterConfig{}
+			cfg.Strategy = "priority"
+			cfg.ContextRules = []config.ContextRule{
+				{Name: "short", MinTokens: "0", MaxTokens: "1024"},
+				{Name: "long", MinTokens: "1025", MaxTokens: "1M"},
+			}
+			cfg.PromptCompression = config.PromptCompressionConfig{Enabled: true, MaxTokens: 128}
+			for _, rule := range cfg.ContextRules {
+				cfg.Decisions = append(cfg.Decisions, config.Decision{
+					Name:  rule.Name,
+					Rules: config.RuleNode{Type: config.SignalTypeContext, Name: rule.Name},
+				})
+			}
+			// Platform's adapter sends request phases only, so no provider usage
+			// calibrates this fresh classifier's initial byte-based estimate.
+			classifier, err := classification.BuildClassifier(cfg, nil, nil, nil)
+			require.NoError(t, err)
+			router := &OpenAIRouter{Config: cfg, Classifier: classifier}
+			ctx := &RequestContext{TraceContext: context.Background(), Headers: map[string]string{}}
+			body, err := json.Marshal(map[string]any{
+				"model":    "auto",
+				"messages": []map[string]string{{"role": "user", "content": tc.input}},
+			})
+			require.NoError(t, err)
+			fast, err := router.extractFastRequestState(body, ctx)
+			require.NoError(t, err)
+			history := signalConversationHistoryFromFastExtract(fast)
+			input := router.prepareSignalEvaluationInput(history)
+			require.Equal(t, tc.input, input.allMessagesText)
+			if tc.name == "long" {
+				require.Less(t, len(input.compressedText), len(tc.input))
+				require.LessOrEqual(t, (len(input.compressedText)+3)/4, 1024,
+					"counting the compressed text would incorrectly select the short route")
+			} else {
+				require.Equal(t, tc.input, input.compressedText)
+			}
+
+			signals, err := router.evaluateSignalsForDecision("auto", input, history.nonUserMessages, ctx)
+			require.NoError(t, err)
+			// Assert the signal's own result, so fallback diagnostics cannot hide
+			// a skipped context classifier or counting compressed text.
+			assert.Equal(t, []string{tc.name}, signals.MatchedContextRules)
+			assert.Equal(t, (len(tc.input)+3)/4, signals.TokenCount)
+			assert.Equal(t, signals.MatchedContextRules, ctx.VSRMatchedContext)
+			assert.Equal(t, signals.TokenCount, ctx.VSRContextTokenCount)
+			result, fallback := router.runDecisionEngine("auto", ctx, signals, nil)
+			require.NotNil(t, result)
+			require.NotNil(t, result.Decision)
+			assert.Empty(t, fallback)
+			assert.Equal(t, tc.name, result.Decision.Name)
+		})
+	}
+}
 
 func TestPrepareSignalEvaluationInput_CombinesMessagesWithoutCompression(t *testing.T) {
 	router := &OpenAIRouter{
